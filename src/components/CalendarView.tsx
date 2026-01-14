@@ -441,6 +441,9 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [selectedEvent, onDeleteTask, onDeleteSubtask]);
 
+  // Dragging event position for visual feedback (rendered as overlay)
+  const [dragEventX, setDragEventX] = useState<number>(0);
+
   // Reference to track current dragEventY for the global handler
   const dragEventYRef = useRef(dragEventY);
   const dragEventDayRef = useRef<Date | null>(dragEventDay);
@@ -459,6 +462,9 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     if (!draggingEvent) return;
 
     const handleGlobalMouseMove = (e: MouseEvent) => {
+      // Store global mouse position for overlay rendering
+      setDragEventX(e.clientX);
+
       // Find the timeline column under the mouse
       const element = document.elementFromPoint(e.clientX, e.clientY);
       const timeline = element?.closest('[data-timeline]') as HTMLElement;
@@ -481,6 +487,9 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           // Day view - keep the current date
           setDragEventDay(currentDate);
         }
+      } else {
+        // Even when outside timeline, track position for visual feedback
+        setDragEventY(e.clientY);
       }
     };
 
@@ -524,6 +533,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     e.stopPropagation();
     setDraggingEvent(event);
     setDragEventDay(day);
+    setDragEventX(e.clientX);
     // Get the timeline container, not the event element
     const timeline = e.currentTarget.closest('[data-timeline]') as HTMLElement;
     if (timeline) {
@@ -745,9 +755,15 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     // Calculate position for dragging event
     const displayTop = isDragging ? dragEventY : top;
 
+    // Don't render in column if being dragged to different day - will be rendered as overlay
+    if (isDragging && dragEventDay && !isSameDay(dragEventDay, day)) {
+      return null;
+    }
+
     return (
       <div
         key={event.id}
+        data-calendar-event
         className={`
           absolute rounded-md px-2 py-1 text-xs overflow-hidden
           transition-all group select-none
@@ -795,19 +811,44 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           </div>
         )}
 
-        {/* Quick actions button (appears on hover) */}
+        {/* Quick actions buttons (appears on hover or when selected) */}
         {event.isFromApp && (
-          <button
-            data-event-popup-trigger
-            onClick={(e) => handleShowPopup(event, e)}
-            className={`
-              absolute top-1 right-1 p-0.5 rounded
-              bg-white/20 hover:bg-white/30 transition-all
-              ${isHovered || isPopupOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}
-            `}
-          >
-            <MoreHorizontal className="w-3.5 h-3.5 text-white" />
-          </button>
+          <div className={`
+            absolute top-1 right-1 flex items-center gap-0.5
+            ${isSelected || isHovered || isPopupOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}
+            transition-all
+          `}>
+            {/* Open button */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleOpenEvent(event, e);
+              }}
+              className="p-0.5 rounded bg-white/20 hover:bg-white/30 transition-all"
+              title="Open details"
+            >
+              <Eye className="w-3.5 h-3.5 text-white" />
+            </button>
+            {/* Delete button */}
+            <button
+              onClick={(e) => {
+                e.stopPropagation();
+                handleDeleteEvent(event, e);
+              }}
+              className="p-0.5 rounded bg-white/20 hover:bg-red-500/50 transition-all"
+              title="Delete (or press Delete key)"
+            >
+              <Trash2 className="w-3.5 h-3.5 text-white" />
+            </button>
+            {/* More options button */}
+            <button
+              data-event-popup-trigger
+              onClick={(e) => handleShowPopup(event, e)}
+              className="p-0.5 rounded bg-white/20 hover:bg-white/30 transition-all"
+            >
+              <MoreHorizontal className="w-3.5 h-3.5 text-white" />
+            </button>
+          </div>
         )}
 
         {/* Popup menu */}
@@ -973,7 +1014,11 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
       </div>
 
       {/* Content */}
-      <div className="flex flex-1 overflow-hidden" onClick={() => setSelectedEvent(null)}>
+      <div className="flex flex-1 overflow-hidden" onClick={(e) => {
+        // Only deselect if clicking directly on the background, not on events
+        if ((e.target as HTMLElement).closest('[data-calendar-event]')) return;
+        setSelectedEvent(null);
+      }}>
         {/* Main Calendar Area */}
         <div className="flex-1 overflow-hidden">
           {viewMode === 'month' ? (
@@ -1394,6 +1439,38 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           )}
         </div>
       </div>
+
+      {/* Drag overlay - follows mouse cursor when dragging event */}
+      {draggingEvent && (
+        <div
+          className="fixed pointer-events-none z-[100]"
+          style={{
+            left: `${dragEventX - 80}px`, // Center on cursor (160px width / 2)
+            top: `${dragEventY - 20}px`, // Offset slightly above cursor
+            width: '160px',
+          }}
+        >
+          <div
+            className={`
+              rounded-md px-2 py-1 text-xs shadow-2xl
+              ${draggingEvent.isSubtask ? 'bg-[#F59E0B]' : 'bg-[#5E5CE6]'}
+              ring-2 ring-white/50 scale-105 opacity-90
+            `}
+            style={{ height: '40px' }}
+          >
+            <div className="font-medium text-white truncate">
+              {draggingEvent.isSubtask && <span className="opacity-70">↳ </span>}
+              {draggingEvent.title}
+            </div>
+            <div className="text-white/70 text-[10px]">
+              {dragEventDay ? format(dragEventDay, 'EEE d MMM') : ''} • {(() => {
+                const { hour, minutes } = yToTime(dragEventY);
+                return `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }
