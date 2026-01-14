@@ -689,9 +689,9 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     const startY = Math.min(dragState.startY, dragState.currentY);
     const endY = Math.max(dragState.startY, dragState.currentY);
 
-    // Require minimum drag distance of 20px to create a task (prevents accidental creation)
+    // Require minimum drag distance of 48px (1 hour) to create a task (prevents accidental creation)
     const dragDistance = Math.abs(dragState.currentY - dragState.startY);
-    if (dragDistance < 20) {
+    if (dragDistance < 48) {
       setDragState({
         isDragging: false,
         startY: 0,
@@ -772,7 +772,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
         key={event.id}
         data-calendar-event
         className={`
-          absolute rounded-md px-2 py-1 text-xs overflow-hidden
+          absolute rounded px-1.5 py-0.5 overflow-hidden
           transition-all group select-none
           ${event.isSubtask ? 'bg-[#F59E0B]' : event.isFromApp ? 'bg-[#5E5CE6]' : 'bg-[#10B981]'}
           ${event.taskStatus === 'done' ? 'opacity-40' : ''}
@@ -805,57 +805,29 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
         }}
       >
         {/* Event content */}
-        <div className="font-medium text-white truncate pr-6">
+        <div className="font-medium text-white truncate pr-4 text-[11px] leading-tight">
           {event.isSubtask && <span className="opacity-70">↳ </span>}
           {event.title}
         </div>
-        {height > 30 && (
-          <div className="text-white/70 text-[10px]">
+        {height > 24 && (
+          <div className="text-white/70 text-[9px] leading-tight">
             {format(parseISO(event.start), 'HH:mm')}
-            {event.isSubtask && event.parentTaskTitle && (
-              <span className="ml-1 opacity-60">• {event.parentTaskTitle}</span>
-            )}
           </div>
         )}
 
-        {/* Quick actions buttons (appears on hover or when selected) */}
+        {/* Quick action button (appears on hover) - only show menu button to save space */}
         {event.isFromApp && (
-          <div className={`
-            absolute top-1 right-1 flex items-center gap-0.5
-            ${isSelected || isHovered || isPopupOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}
-            transition-all
-          `}>
-            {/* Open button */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleOpenEvent(event, e);
-              }}
-              className="p-0.5 rounded bg-white/20 hover:bg-white/30 transition-all"
-              title="Open details"
-            >
-              <Eye className="w-3.5 h-3.5 text-white" />
-            </button>
-            {/* Delete button */}
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                handleDeleteEvent(event, e);
-              }}
-              className="p-0.5 rounded bg-white/20 hover:bg-red-500/50 transition-all"
-              title="Delete (or press Delete key)"
-            >
-              <Trash2 className="w-3.5 h-3.5 text-white" />
-            </button>
-            {/* More options button */}
-            <button
-              data-event-popup-trigger
-              onClick={(e) => handleShowPopup(event, e)}
-              className="p-0.5 rounded bg-white/20 hover:bg-white/30 transition-all"
-            >
-              <MoreHorizontal className="w-3.5 h-3.5 text-white" />
-            </button>
-          </div>
+          <button
+            data-event-popup-trigger
+            onClick={(e) => handleShowPopup(event, e)}
+            className={`
+              absolute top-0.5 right-0.5 p-0.5 rounded
+              bg-black/30 hover:bg-black/50 transition-all
+              ${isSelected || isHovered || isPopupOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}
+            `}
+          >
+            <MoreHorizontal className="w-3 h-3 text-white" />
+          </button>
         )}
 
         {/* Popup menu */}
