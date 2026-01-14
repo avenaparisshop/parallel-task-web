@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
   ChevronLeft,
   ChevronRight,
@@ -394,14 +394,51 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     return () => document.removeEventListener('click', handleClickOutside);
   }, []);
 
-  // Handle global mouseup for event dragging
+  // Reference to track current dragEventY for the global handler
+  const dragEventYRef = useRef(dragEventY);
+  const dragEventDayRef = useRef<Date | null>(dragEventDay);
+
+  // Keep refs in sync
+  useEffect(() => {
+    dragEventYRef.current = dragEventY;
+  }, [dragEventY]);
+
+  useEffect(() => {
+    dragEventDayRef.current = dragEventDay;
+  }, [dragEventDay]);
+
+  // Handle global mouse events for event dragging
   useEffect(() => {
     if (!draggingEvent) return;
 
+    const handleGlobalMouseMove = (e: MouseEvent) => {
+      // Find the timeline column under the mouse
+      const element = document.elementFromPoint(e.clientX, e.clientY);
+      const timeline = element?.closest('[data-timeline]') as HTMLElement;
+
+      if (timeline) {
+        const rect = timeline.getBoundingClientRect();
+        const newY = e.clientY - rect.top;
+        setDragEventY(newY);
+
+        // Try to determine which day this column belongs to
+        const dayIndex = Array.from(document.querySelectorAll('[data-timeline]')).indexOf(timeline);
+        if (dayIndex >= 0 && dayIndex < 7) {
+          // Week view - update the day based on column index
+          const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 });
+          const newDay = addDays(weekStart, dayIndex);
+          setDragEventDay(newDay);
+        }
+      }
+    };
+
     const handleGlobalMouseUp = () => {
-      if (draggingEvent && dragEventDay) {
-        const { hour, minutes } = yToTime(dragEventY);
-        const due_date = format(dragEventDay, 'yyyy-MM-dd');
+      const currentY = dragEventYRef.current;
+      const currentDay = dragEventDayRef.current;
+
+      if (draggingEvent && currentDay) {
+        const { hour, minutes } = yToTime(currentY);
+        const due_date = format(currentDay, 'yyyy-MM-dd');
         const due_time = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
 
         if (draggingEvent.isSubtask && draggingEvent.subtaskId && onSubtaskMove) {
@@ -417,9 +454,13 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
       setTimeout(() => setWasDragging(false), 100);
     };
 
+    document.addEventListener('mousemove', handleGlobalMouseMove);
     document.addEventListener('mouseup', handleGlobalMouseUp);
-    return () => document.removeEventListener('mouseup', handleGlobalMouseUp);
-  }, [draggingEvent, dragEventDay, dragEventY, onTaskMove, onSubtaskMove]);
+    return () => {
+      document.removeEventListener('mousemove', handleGlobalMouseMove);
+      document.removeEventListener('mouseup', handleGlobalMouseUp);
+    };
+  }, [draggingEvent, currentDate, onTaskMove, onSubtaskMove]);
 
   // Handle event drag start
   const handleEventDragStart = (event: CalendarEvent, e: React.MouseEvent, day: Date) => {
