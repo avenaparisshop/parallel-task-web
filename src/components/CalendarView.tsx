@@ -435,16 +435,22 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     const handleGlobalMouseUp = () => {
       const currentY = dragEventYRef.current;
       const currentDay = dragEventDayRef.current;
+      console.log('[Drag] MouseUp - draggingEvent:', draggingEvent?.title, 'currentDay:', currentDay, 'currentY:', currentY);
 
       if (draggingEvent && currentDay) {
         const { hour, minutes } = yToTime(currentY);
         const due_date = format(currentDay, 'yyyy-MM-dd');
         const due_time = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+        console.log('[Drag] Saving - date:', due_date, 'time:', due_time);
 
         if (draggingEvent.isSubtask && draggingEvent.subtaskId && onSubtaskMove) {
+          console.log('[Drag] Moving subtask:', draggingEvent.subtaskId);
           onSubtaskMove(draggingEvent.subtaskId, { due_date, due_time });
         } else if (draggingEvent.taskId && onTaskMove) {
+          console.log('[Drag] Moving task:', draggingEvent.taskId);
           onTaskMove(draggingEvent.taskId, { due_date, due_time });
+        } else {
+          console.log('[Drag] No move handler available - onTaskMove:', !!onTaskMove, 'onSubtaskMove:', !!onSubtaskMove);
         }
       }
       setDraggingEvent(null);
@@ -464,16 +470,23 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
 
   // Handle event drag start
   const handleEventDragStart = (event: CalendarEvent, e: React.MouseEvent, day: Date) => {
-    if (!event.isFromApp) return; // Only allow dragging app events
+    console.log('[Drag] Start - event:', event.title, 'isFromApp:', event.isFromApp, 'taskId:', event.taskId);
+    if (!event.isFromApp) {
+      console.log('[Drag] Rejected - not from app');
+      return;
+    }
     e.preventDefault();
     e.stopPropagation();
     setDraggingEvent(event);
     setDragEventDay(day);
     // Get the timeline container, not the event element
     const timeline = e.currentTarget.closest('[data-timeline]') as HTMLElement;
+    console.log('[Drag] Timeline found:', !!timeline);
     if (timeline) {
       const rect = timeline.getBoundingClientRect();
-      setDragEventY(e.clientY - rect.top);
+      const y = e.clientY - rect.top;
+      console.log('[Drag] Setting Y:', y);
+      setDragEventY(y);
     }
   };
 
