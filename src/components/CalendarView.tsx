@@ -141,12 +141,17 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
   const [dragEventDay, setDragEventDay] = useState<Date | null>(null);
   const [wasDragging, setWasDragging] = useState(false); // Track if we just finished dragging
 
+  // Selected event state (for keyboard shortcuts)
+  const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
+
   // Convert tasks to calendar events
+  // Include ALL tasks with due_date, we'll filter out Google events that have matching tasks
   const taskEvents: CalendarEvent[] = useMemo(() => {
-    return tasks
-      .filter(task => task.due_date && !task.google_calendar_event_id)
+    const events = tasks
+      .filter(task => task.due_date)
       .map(task => {
-        const startDate = task.due_date!;
+        // Extract just the date part (YYYY-MM-DD) in case due_date includes time
+        const startDate = task.due_date!.split('T')[0];
         let startDateTime = startDate;
         let endDateTime = startDate;
 
@@ -173,6 +178,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           isSubtask: false,
         };
       });
+    return events;
   }, [tasks]);
 
   // Convert subtasks to calendar events (with different color)
@@ -181,7 +187,8 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
       .filter(subtask => subtask.due_date)
       .map(subtask => {
         const parentTask = tasks.find(t => t.id === subtask.task_id);
-        const startDate = subtask.due_date!;
+        // Extract just the date part (YYYY-MM-DD) in case due_date includes time
+        const startDate = subtask.due_date!.split('T')[0];
         let startDateTime = startDate;
         let endDateTime = startDate;
 
@@ -213,9 +220,23 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
       });
   }, [subtasks, tasks]);
 
+  // Combine events, filtering out Google events that correspond to tasks we already have
+  // This prevents duplicates when tasks are synced to Google Calendar
   const events = useMemo(() => {
-    return [...googleEvents, ...taskEvents, ...subtaskEvents];
-  }, [googleEvents, taskEvents, subtaskEvents]);
+    // Get set of google_calendar_event_ids from our tasks
+    const syncedEventIds = new Set(
+      tasks
+        .filter(t => t.google_calendar_event_id)
+        .map(t => t.google_calendar_event_id)
+    );
+
+    // Filter out Google events that are already represented by our tasks
+    const filteredGoogleEvents = googleEvents.filter(
+      ge => !syncedEventIds.has(ge.id)
+    );
+
+    return [...filteredGoogleEvents, ...taskEvents, ...subtaskEvents];
+  }, [googleEvents, taskEvents, subtaskEvents, tasks]);
 
   // Check connection status
   useEffect(() => {
@@ -394,6 +415,32 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     return () => document.removeEventListener('click', handleClickOutside);
   }, []);
 
+  // Handle Delete key to delete selected event
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Delete' || e.key === 'Backspace') {
+        // Don't delete if user is typing in an input
+        if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
+          return;
+        }
+        if (selectedEvent && selectedEvent.isFromApp) {
+          e.preventDefault();
+          if (selectedEvent.isSubtask && selectedEvent.subtaskId && onDeleteSubtask) {
+            onDeleteSubtask(selectedEvent.subtaskId);
+          } else if (selectedEvent.taskId && onDeleteTask) {
+            onDeleteTask(selectedEvent.taskId);
+          }
+          setSelectedEvent(null);
+        }
+      } else if (e.key === 'Escape') {
+        setSelectedEvent(null);
+        setPopupEventId(null);
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+    return () => document.removeEventListener('keydown', handleKeyDown);
+  }, [selectedEvent, onDeleteTask, onDeleteSubtask]);
+
   // Reference to track current dragEventY for the global handler
   const dragEventYRef = useRef(dragEventY);
   const dragEventDayRef = useRef<Date | null>(dragEventDay);
@@ -421,13 +468,18 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
         const newY = e.clientY - rect.top;
         setDragEventY(newY);
 
-        // Try to determine which day this column belongs to
-        const dayIndex = Array.from(document.querySelectorAll('[data-timeline]')).indexOf(timeline);
-        if (dayIndex >= 0 && dayIndex < 7) {
-          // Week view - update the day based on column index
-          const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 });
-          const newDay = addDays(weekStart, dayIndex);
-          setDragEventDay(newDay);
+        // Get day index from data attribute for reliable cross-day dragging
+        const dayIndexAttr = timeline.getAttribute('data-day-index');
+        if (dayIndexAttr !== null) {
+          const dayIndex = parseInt(dayIndexAttr, 10);
+          if (dayIndex >= 0 && dayIndex < 7) {
+            const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 });
+            const newDay = addDays(weekStart, dayIndex);
+            setDragEventDay(newDay);
+          }
+        } else if (viewMode === 'day') {
+          // Day view - keep the current date
+          setDragEventDay(currentDate);
         }
       }
     };
@@ -435,22 +487,16 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     const handleGlobalMouseUp = () => {
       const currentY = dragEventYRef.current;
       const currentDay = dragEventDayRef.current;
-      console.log('[Drag] MouseUp - draggingEvent:', draggingEvent?.title, 'currentDay:', currentDay, 'currentY:', currentY);
 
       if (draggingEvent && currentDay) {
         const { hour, minutes } = yToTime(currentY);
         const due_date = format(currentDay, 'yyyy-MM-dd');
         const due_time = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-        console.log('[Drag] Saving - date:', due_date, 'time:', due_time);
 
         if (draggingEvent.isSubtask && draggingEvent.subtaskId && onSubtaskMove) {
-          console.log('[Drag] Moving subtask:', draggingEvent.subtaskId);
           onSubtaskMove(draggingEvent.subtaskId, { due_date, due_time });
         } else if (draggingEvent.taskId && onTaskMove) {
-          console.log('[Drag] Moving task:', draggingEvent.taskId);
           onTaskMove(draggingEvent.taskId, { due_date, due_time });
-        } else {
-          console.log('[Drag] No move handler available - onTaskMove:', !!onTaskMove, 'onSubtaskMove:', !!onSubtaskMove);
         }
       }
       setDraggingEvent(null);
@@ -466,13 +512,12 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
       document.removeEventListener('mousemove', handleGlobalMouseMove);
       document.removeEventListener('mouseup', handleGlobalMouseUp);
     };
-  }, [draggingEvent, currentDate, onTaskMove, onSubtaskMove]);
+  }, [draggingEvent, currentDate, viewMode, onTaskMove, onSubtaskMove]);
 
   // Handle event drag start
   const handleEventDragStart = (event: CalendarEvent, e: React.MouseEvent, day: Date) => {
-    console.log('[Drag] Start - event:', event.title, 'isFromApp:', event.isFromApp, 'taskId:', event.taskId);
-    if (!event.isFromApp) {
-      console.log('[Drag] Rejected - not from app');
+    // Only allow dragging if we have a taskId or subtaskId to update
+    if (!event.isFromApp || (!event.taskId && !event.subtaskId)) {
       return;
     }
     e.preventDefault();
@@ -481,11 +526,9 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     setDragEventDay(day);
     // Get the timeline container, not the event element
     const timeline = e.currentTarget.closest('[data-timeline]') as HTMLElement;
-    console.log('[Drag] Timeline found:', !!timeline);
     if (timeline) {
       const rect = timeline.getBoundingClientRect();
       const y = e.clientY - rect.top;
-      console.log('[Drag] Setting Y:', y);
       setDragEventY(y);
     }
   };
@@ -683,6 +726,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     const isHovered = hoveredEventId === event.id;
     const isPopupOpen = popupEventId === event.id;
     const isDragging = draggingEvent?.id === event.id;
+    const isSelected = selectedEvent?.id === event.id;
 
     // Calculate position for dragging event
     const displayTop = isDragging ? dragEventY : top;
@@ -695,6 +739,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           transition-all group select-none
           ${event.isSubtask ? 'bg-[#F59E0B]' : event.isFromApp ? 'bg-[#5E5CE6]' : 'bg-[#10B981]'}
           ${event.taskStatus === 'done' ? 'opacity-40' : ''}
+          ${isSelected ? 'ring-2 ring-white shadow-lg scale-[1.02] z-40' : ''}
           ${isDragging ? 'ring-2 ring-white/50 shadow-xl scale-[1.05] z-50 cursor-grabbing' :
             isHovered || isPopupOpen ? 'ring-2 ring-white/30 shadow-lg scale-[1.02] z-30 cursor-grab' :
             'hover:ring-2 hover:ring-white/20 hover:shadow-md z-10 cursor-grab'}
@@ -708,6 +753,14 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           }
         }}
         onClick={(e) => {
+          if (!draggingEvent && !wasDragging) {
+            e.stopPropagation();
+            // Select the event (for keyboard shortcuts like Delete)
+            setSelectedEvent(event);
+            // Double-click opens details, single click just selects
+          }
+        }}
+        onDoubleClick={(e) => {
           if (!draggingEvent && !wasDragging) {
             e.stopPropagation();
             handleOpenEvent(event, e);
@@ -906,7 +959,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
       </div>
 
       {/* Content */}
-      <div className="flex flex-1 overflow-hidden">
+      <div className="flex flex-1 overflow-hidden" onClick={() => setSelectedEvent(null)}>
         {/* Main Calendar Area */}
         <div className="flex-1 overflow-hidden">
           {viewMode === 'month' ? (
@@ -1022,6 +1075,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
                       <div
                         key={dayIndex}
                         data-timeline
+                        data-day-index={dayIndex}
                         className={`relative border-l ${colors.borderLight} ${isToday(day) ? 'bg-[#5E5CE6]/5' : ''} ${draggingEvent ? 'cursor-grabbing' : onCreateTask ? 'cursor-crosshair' : ''}`}
                         onMouseDown={(e) => {
                           if (!draggingEvent) handleTimelineMouseDown(e, day);
