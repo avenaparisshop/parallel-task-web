@@ -139,6 +139,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
   const [draggingEvent, setDraggingEvent] = useState<CalendarEvent | null>(null);
   const [dragEventY, setDragEventY] = useState<number>(0);
   const [dragEventDay, setDragEventDay] = useState<Date | null>(null);
+  const [wasDragging, setWasDragging] = useState(false); // Track if we just finished dragging
 
   // Convert tasks to calendar events
   const taskEvents: CalendarEvent[] = useMemo(() => {
@@ -393,6 +394,33 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     return () => document.removeEventListener('click', handleClickOutside);
   }, []);
 
+  // Handle global mouseup for event dragging
+  useEffect(() => {
+    if (!draggingEvent) return;
+
+    const handleGlobalMouseUp = () => {
+      if (draggingEvent && dragEventDay) {
+        const { hour, minutes } = yToTime(dragEventY);
+        const due_date = format(dragEventDay, 'yyyy-MM-dd');
+        const due_time = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+
+        if (draggingEvent.isSubtask && draggingEvent.subtaskId && onSubtaskMove) {
+          onSubtaskMove(draggingEvent.subtaskId, { due_date, due_time });
+        } else if (draggingEvent.taskId && onTaskMove) {
+          onTaskMove(draggingEvent.taskId, { due_date, due_time });
+        }
+      }
+      setDraggingEvent(null);
+      setDragEventDay(null);
+      // Set wasDragging to prevent click from firing after drag
+      setWasDragging(true);
+      setTimeout(() => setWasDragging(false), 100);
+    };
+
+    document.addEventListener('mouseup', handleGlobalMouseUp);
+    return () => document.removeEventListener('mouseup', handleGlobalMouseUp);
+  }, [draggingEvent, dragEventDay, dragEventY, onTaskMove, onSubtaskMove]);
+
   // Handle event drag start
   const handleEventDragStart = (event: CalendarEvent, e: React.MouseEvent, day: Date) => {
     if (!event.isFromApp) return; // Only allow dragging app events
@@ -400,8 +428,12 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     e.stopPropagation();
     setDraggingEvent(event);
     setDragEventDay(day);
-    const rect = (e.currentTarget.parentElement as HTMLElement).getBoundingClientRect();
-    setDragEventY(e.clientY - rect.top);
+    // Get the timeline container, not the event element
+    const timeline = e.currentTarget.closest('[data-timeline]') as HTMLElement;
+    if (timeline) {
+      const rect = timeline.getBoundingClientRect();
+      setDragEventY(e.clientY - rect.top);
+    }
   };
 
   // Handle event drag move
@@ -431,6 +463,9 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
 
     setDraggingEvent(null);
     setDragEventDay(null);
+    // Set wasDragging to prevent click from firing after drag
+    setWasDragging(true);
+    setTimeout(() => setWasDragging(false), 100);
   };
 
   // Get events for a day
@@ -619,7 +654,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           }
         }}
         onClick={(e) => {
-          if (!draggingEvent) {
+          if (!draggingEvent && !wasDragging) {
             e.stopPropagation();
             handleOpenEvent(event, e);
           }
@@ -932,6 +967,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
                     return (
                       <div
                         key={dayIndex}
+                        data-timeline
                         className={`relative border-l ${colors.borderLight} ${isToday(day) ? 'bg-[#5E5CE6]/5' : ''} ${draggingEvent ? 'cursor-grabbing' : onCreateTask ? 'cursor-crosshair' : ''}`}
                         onMouseDown={(e) => {
                           if (!draggingEvent) handleTimelineMouseDown(e, day);
@@ -1017,6 +1053,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
 
                   {/* Timeline area */}
                   <div
+                    data-timeline
                     className={`absolute left-14 right-0 top-0 bottom-0 ${draggingEvent ? 'cursor-grabbing' : onCreateTask ? 'cursor-crosshair' : ''}`}
                     onMouseDown={(e) => {
                       if (!draggingEvent) handleTimelineMouseDown(e, currentDate);
