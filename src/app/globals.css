@@ -1,0 +1,194 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+* {
+  box-sizing: border-box;
+  padding: 0;
+  margin: 0;
+}
+
+html,
+body {
+  max-width: 100vw;
+  overflow-x: hidden;
+  background-color: #0D0D0D;
+  color: #FFFFFF;
+}
+
+/* Smooth theme transitions */
+[data-theme] * {
+  transition: background-color 0.25s ease,
+              border-color 0.25s ease,
+              color 0.2s ease,
+              box-shadow 0.25s ease;
+}
+
+/* Disable transitions for elements that shouldn't animate */
+[data-theme] button:active,
+[data-theme] .no-transition,
+[data-theme] input,
+[data-theme] textarea,
+[data-theme] select {
+  transition: none;
+}
+
+/* Re-enable hover transitions for buttons */
+[data-theme] button:not(:active) {
+  transition: background-color 0.15s ease,
+              border-color 0.15s ease,
+              color 0.1s ease,
+              transform 0.15s ease;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #3A3A3A;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #4A4A4A;
+}
+
+/* Focus styles */
+*:focus-visible {
+  outline: 2px solid #5E5CE6;
+  outline-offset: 2px;
+}
+
+/* Input placeholder */
+::placeholder {
+  color: #6B6B6B;
+}
+
+/* Selection */
+::selection {
+  background-color: rgba(94, 92, 230, 0.3);
+}
+
+/* Custom utilities */
+@layer utilities {
+  .text-balance {
+    text-wrap: balance;
+  }
+
+  .glass {
+    backdrop-filter: blur(10px);
+    background-color: rgba(26, 26, 26, 0.8);
+  }
+
+  .gradient-border {
+    border: 1px solid transparent;
+    background: linear-gradient(#1A1A1A, #1A1A1A) padding-box,
+                linear-gradient(135deg, #5E5CE6, #3A3AC0) border-box;
+  }
+}
+
+/* Animation delay utilities */
+.animation-delay-100 { animation-delay: 100ms; }
+.animation-delay-200 { animation-delay: 200ms; }
+.animation-delay-300 { animation-delay: 300ms; }
+.animation-delay-400 { animation-delay: 400ms; }
+.animation-delay-500 { animation-delay: 500ms; }
+
+/* Modal backdrop */
+.modal-backdrop {
+  background-color: rgba(0, 0, 0, 0.7);
+  backdrop-filter: blur(4px);
+}
+
+/* Task card hover effect */
+.task-card {
+  transition: all 0.15s ease;
+}
+
+.task-card:hover {
+  background-color: #252525;
+  transform: translateY(-1px);
+}
+
+/* Sidebar item */
+.sidebar-item {
+  transition: all 0.1s ease;
+}
+
+.sidebar-item:hover {
+  background-color: #1A1A1A;
+}
+
+.sidebar-item.active {
+  background-color: rgba(94, 92, 230, 0.15);
+  color: #5E5CE6;
+}
+
+/* Button base styles */
+.btn {
+  @apply px-4 py-2 rounded-lg font-medium transition-all duration-150 flex items-center justify-center gap-2;
+}
+
+.btn-primary {
+  @apply bg-accent hover:bg-accent-hover text-white;
+}
+
+.btn-secondary {
+  @apply bg-surface hover:bg-surface-hover text-text-primary border border-border;
+}
+
+.btn-ghost {
+  @apply bg-transparent hover:bg-surface-hover text-text-secondary hover:text-text-primary;
+}
+
+.btn-danger {
+  @apply bg-error/10 hover:bg-error/20 text-error;
+}
+
+/* Input styles */
+.input {
+  @apply w-full px-3 py-2 bg-surface border border-border rounded-lg text-text-primary placeholder:text-text-tertiary focus:border-accent focus:ring-1 focus:ring-accent transition-all duration-150;
+}
+
+.input-error {
+  @apply border-error focus:border-error focus:ring-error;
+}
+
+/* Badge styles */
+.badge {
+  @apply inline-flex items-center px-2 py-0.5 rounded text-xs font-medium;
+}
+
+/* Dropdown menu */
+.dropdown-menu {
+  @apply absolute z-50 mt-1 bg-surface border border-border rounded-lg shadow-xl overflow-hidden animate-fade-in;
+}
+
+.dropdown-item {
+  @apply px-3 py-2 text-sm text-text-secondary hover:bg-surface-hover hover:text-text-primary cursor-pointer flex items-center gap-2 transition-colors;
+}
+
+/* Kanban column */
+.kanban-column {
+  @apply flex-shrink-0 w-72 bg-surface/50 rounded-lg p-3;
+}
+
+.kanban-column-header {
+  @apply flex items-center justify-between mb-3 px-1;
+}
+
+/* Priority indicator */
+.priority-indicator {
+  @apply w-1 h-full rounded-full absolute left-0 top-0;
+}
