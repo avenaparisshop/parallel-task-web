@@ -680,7 +680,21 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
   };
 
   // Handle mouse up to complete drag
+  // DISABLED: Task creation by drag is disabled to prevent accidental task creation
   const handleTimelineMouseUp = () => {
+    // Always reset drag state - never create tasks
+    setDragState({
+      isDragging: false,
+      startY: 0,
+      currentY: 0,
+      day: null,
+      startHour: 0,
+      startMinutes: 0,
+    });
+    return;
+
+    // OLD CODE - DISABLED
+    /*
     if (!dragState.isDragging || !dragState.day || !onCreateTask) {
       setDragState(prev => ({ ...prev, isDragging: false }));
       return;
@@ -702,6 +716,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
       });
       return;
     }
+    */
 
     const startTime = yToTime(startY);
     const endTime = yToTime(endY);
