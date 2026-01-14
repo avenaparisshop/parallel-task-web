@@ -672,6 +672,20 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     const startY = Math.min(dragState.startY, dragState.currentY);
     const endY = Math.max(dragState.startY, dragState.currentY);
 
+    // Require minimum drag distance of 20px to create a task (prevents accidental creation)
+    const dragDistance = Math.abs(dragState.currentY - dragState.startY);
+    if (dragDistance < 20) {
+      setDragState({
+        isDragging: false,
+        startY: 0,
+        currentY: 0,
+        day: null,
+        startHour: 0,
+        startMinutes: 0,
+      });
+      return;
+    }
+
     const startTime = yToTime(startY);
     const endTime = yToTime(endY);
 
@@ -748,21 +762,21 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
         onMouseEnter={() => !draggingEvent && setHoveredEventId(event.id)}
         onMouseLeave={() => !draggingEvent && setHoveredEventId(null)}
         onMouseDown={(e) => {
+          e.stopPropagation(); // Prevent timeline from starting task creation
           if (event.isFromApp && (onTaskMove || onSubtaskMove)) {
             handleEventDragStart(event, e, day);
           }
         }}
         onClick={(e) => {
+          e.stopPropagation();
           if (!draggingEvent && !wasDragging) {
-            e.stopPropagation();
             // Select the event (for keyboard shortcuts like Delete)
             setSelectedEvent(event);
-            // Double-click opens details, single click just selects
           }
         }}
         onDoubleClick={(e) => {
+          e.stopPropagation();
           if (!draggingEvent && !wasDragging) {
-            e.stopPropagation();
             handleOpenEvent(event, e);
           }
         }}
