@@ -145,10 +145,10 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
   const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
 
   // Convert tasks to calendar events
-  // Include ALL tasks with due_date, we'll filter out Google events that have matching tasks
+  // Only include active tasks (not backlog/cancelled) to match Active view
   const taskEvents: CalendarEvent[] = useMemo(() => {
     const events = tasks
-      .filter(task => task.due_date)
+      .filter(task => task.due_date && task.status !== 'backlog' && task.status !== 'cancelled')
       .map(task => {
         // Extract just the date part (YYYY-MM-DD) in case due_date includes time
         const startDate = task.due_date!.split('T')[0];
@@ -419,12 +419,18 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'Delete' || e.key === 'Backspace') {
-        // Don't delete if user is typing in an input
-        if (document.activeElement?.tagName === 'INPUT' || document.activeElement?.tagName === 'TEXTAREA') {
+        // Don't delete if user is typing in an input or editable element
+        const activeEl = document.activeElement;
+        if (activeEl?.tagName === 'INPUT' ||
+            activeEl?.tagName === 'TEXTAREA' ||
+            (activeEl as HTMLElement)?.isContentEditable) {
           return;
         }
+
         if (selectedEvent && selectedEvent.isFromApp) {
           e.preventDefault();
+          e.stopPropagation();
+
           if (selectedEvent.isSubtask && selectedEvent.subtaskId && onDeleteSubtask) {
             onDeleteSubtask(selectedEvent.subtaskId);
           } else if (selectedEvent.taskId && onDeleteTask) {
@@ -437,12 +443,13 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
         setPopupEventId(null);
       }
     };
-    document.addEventListener('keydown', handleKeyDown);
-    return () => document.removeEventListener('keydown', handleKeyDown);
+    document.addEventListener('keydown', handleKeyDown, true); // Use capture phase
+    return () => document.removeEventListener('keydown', handleKeyDown, true);
   }, [selectedEvent, onDeleteTask, onDeleteSubtask]);
 
   // Dragging event position for visual feedback (rendered as overlay)
   const [dragEventX, setDragEventX] = useState<number>(0);
+  const [dragEventScreenY, setDragEventScreenY] = useState<number>(0); // Absolute screen Y for overlay
 
   // Reference to track current dragEventY for the global handler
   const dragEventYRef = useRef(dragEventY);
@@ -464,6 +471,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     const handleGlobalMouseMove = (e: MouseEvent) => {
       // Store global mouse position for overlay rendering
       setDragEventX(e.clientX);
+      setDragEventScreenY(e.clientY); // Always store absolute screen position
 
       // Find the timeline column under the mouse
       const element = document.elementFromPoint(e.clientX, e.clientY);
@@ -472,7 +480,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
       if (timeline) {
         const rect = timeline.getBoundingClientRect();
         const newY = e.clientY - rect.top;
-        setDragEventY(newY);
+        setDragEventY(newY); // Relative Y for time calculation
 
         // Get day index from data attribute for reliable cross-day dragging
         const dayIndexAttr = timeline.getAttribute('data-day-index');
@@ -487,10 +495,8 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           // Day view - keep the current date
           setDragEventDay(currentDate);
         }
-      } else {
-        // Even when outside timeline, track position for visual feedback
-        setDragEventY(e.clientY);
       }
+      // Note: Don't update dragEventY when outside timeline - keep the last valid position
     };
 
     const handleGlobalMouseUp = () => {
@@ -534,6 +540,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     setDraggingEvent(event);
     setDragEventDay(day);
     setDragEventX(e.clientX);
+    setDragEventScreenY(e.clientY); // Store absolute screen position
     // Get the timeline container, not the event element
     const timeline = e.currentTarget.closest('[data-timeline]') as HTMLElement;
     if (timeline) {
@@ -1446,7 +1453,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           className="fixed pointer-events-none z-[100]"
           style={{
             left: `${dragEventX - 80}px`, // Center on cursor (160px width / 2)
-            top: `${dragEventY - 20}px`, // Offset slightly above cursor
+            top: `${dragEventScreenY - 20}px`, // Use absolute screen Y position
             width: '160px',
           }}
         >
