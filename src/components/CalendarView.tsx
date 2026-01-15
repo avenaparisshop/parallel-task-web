@@ -1,22 +1,24 @@
 'use client';
 
 import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { combine } from '@atlaskit/pragmatic-drag-and-drop/combine';
+import { draggable, dropTargetForElements } from '@atlaskit/pragmatic-drag-and-drop/element/adapter';
+import { autoScrollForElements } from '@atlaskit/pragmatic-drag-and-drop-auto-scroll/element';
 import {
   ChevronLeft,
   ChevronRight,
   Calendar as CalendarIcon,
-  Loader2,
-  ExternalLink,
-  CheckCircle2,
-  Circle,
-  Clock,
   RefreshCw,
   Link2,
-  Trash2,
+  MoreHorizontal,
+  Plus,
   Eye,
   Check,
-  MoreHorizontal,
-  X,
+  Circle,
+  Trash2,
+  Clock,
+  ExternalLink,
+  CheckCircle2,
 } from 'lucide-react';
 import {
   format,
@@ -34,19 +36,18 @@ import {
   subMonths,
   isSameMonth,
   isSameDay,
-  isSameWeek,
   isToday,
   parseISO,
   getHours,
   getMinutes,
   differenceInMinutes,
   setHours,
-  setMinutes,
 } from 'date-fns';
 import { getSession, connectGoogleCalendar, getGoogleCalendarStatus } from '@/lib/supabase';
 import { Task, Subtask } from '@/types';
 import { useTheme } from '@/contexts/ThemeContext';
 
+// Types
 interface CalendarEvent {
   id: string;
   title: string;
@@ -63,6 +64,7 @@ interface CalendarEvent {
   isFromApp: boolean;
   isSubtask?: boolean;
   parentTaskTitle?: string;
+  target_date?: string;
 }
 
 interface CalendarViewProps {
@@ -72,20 +74,11 @@ interface CalendarViewProps {
   onSubtaskClick?: (subtaskId: string, taskId: string) => void;
   onEventComplete?: (eventId: string, taskId: string) => void;
   onTaskStatusChange?: (taskId: string, status: string) => void;
-  onCreateTask?: (data: { due_date: string; due_time: string; duration: number }) => void;
+  onCreateTask?: (data: { due_date: string; due_time?: string; duration?: number }) => void;
   onDeleteTask?: (taskId: string) => void;
   onDeleteSubtask?: (subtaskId: string) => void;
-  onTaskMove?: (taskId: string, data: { due_date: string; due_time: string }) => void;
-  onSubtaskMove?: (subtaskId: string, data: { due_date: string; due_time: string }) => void;
-}
-
-interface DragState {
-  isDragging: boolean;
-  startY: number;
-  currentY: number;
-  day: Date | null;
-  startHour: number;
-  startMinutes: number;
+  onTaskMove?: (taskId: string, data: { due_date: string; due_time?: string }) => void;
+  onSubtaskMove?: (subtaskId: string, data: { due_date: string; due_time?: string }) => void;
 }
 
 type ViewMode = 'day' | 'week' | 'month';
@@ -93,7 +86,657 @@ type ViewMode = 'day' | 'week' | 'month';
 // Hours for day/week view (7am to 11pm)
 const HOURS = Array.from({ length: 17 }, (_, i) => i + 7);
 
-export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, onSubtaskClick, onEventComplete, onTaskStatusChange, onCreateTask, onDeleteTask, onDeleteSubtask, onTaskMove, onSubtaskMove }: CalendarViewProps) {
+// ============ Issue Block Component (inspired by Plane) ============
+interface IssueBlockProps {
+  event: CalendarEvent;
+  isDragging?: boolean;
+  onOpen: (event: CalendarEvent) => void;
+  onMarkDone: (event: CalendarEvent) => void;
+  onDelete: (event: CalendarEvent) => void;
+  isDark: boolean;
+}
+
+const IssueBlock = React.forwardRef<HTMLDivElement, IssueBlockProps>(
+  ({ event, isDragging = false, onOpen, onMarkDone, onDelete, isDark }, ref) => {
+    const [isMenuOpen, setIsMenuOpen] = useState(false);
+    const menuRef = useRef<HTMLDivElement>(null);
+
+    // Close menu when clicking outside
+    useEffect(() => {
+      if (!isMenuOpen) return;
+      const handleClickOutside = (e: MouseEvent) => {
+        if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+          setIsMenuOpen(false);
+        }
+      };
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [isMenuOpen]);
+
+    const stateColor = event.isSubtask ? '#F59E0B' : event.isFromApp ? '#5E5CE6' : '#10B981';
+
+    return (
+      <div
+        ref={ref}
+        className={`
+          group/calendar-block flex h-8 w-full items-center justify-between gap-1.5 rounded-md px-1.5 py-1
+          border border-transparent transition-all cursor-grab
+          ${isDragging
+            ? 'bg-white/20 shadow-xl border-white/50 scale-105 opacity-90'
+            : isDark ? 'bg-[#1A1A1A] hover:bg-[#252525]' : 'bg-white hover:bg-gray-50 shadow-sm'
+          }
+          ${event.taskStatus === 'done' ? 'opacity-50' : ''}
+        `}
+        onClick={() => onOpen(event)}
+      >
+        <div className="flex h-full items-center gap-1.5 truncate min-w-0">
+          {/* State color indicator */}
+          <span
+            className="h-full w-1 flex-shrink-0 rounded-sm"
+            style={{ backgroundColor: stateColor }}
+          />
+          {/* Title */}
+          <div className={`truncate text-xs font-medium ${isDark ? 'text-[#E0E0E0]' : 'text-gray-800'} ${event.taskStatus === 'done' ? 'line-through' : ''}`}>
+            {event.isSubtask && <span className="opacity-60 mr-0.5">↳</span>}
+            {event.title}
+          </div>
+        </div>
+
+        {/* Quick action menu */}
+        <div
+          ref={menuRef}
+          className={`flex-shrink-0 relative ${isMenuOpen ? 'block' : 'hidden group-hover/calendar-block:block'}`}
+          onClick={(e) => e.stopPropagation()}
+        >
+          <button
+            onClick={() => setIsMenuOpen(!isMenuOpen)}
+            className={`p-0.5 rounded transition-colors ${isDark ? 'hover:bg-[#3A3A3A]' : 'hover:bg-gray-200'}`}
+          >
+            <MoreHorizontal className={`w-3.5 h-3.5 ${isDark ? 'text-[#A0A0A0]' : 'text-gray-500'}`} />
+          </button>
+
+          {/* Dropdown menu */}
+          {isMenuOpen && (
+            <div
+              className={`
+                absolute right-0 top-full mt-1 z-50 py-1 min-w-[140px] rounded-lg shadow-xl border
+                ${isDark ? 'bg-[#1A1A1A] border-[#2E2E2E]' : 'bg-white border-gray-200'}
+              `}
+            >
+              <button
+                onClick={() => { onOpen(event); setIsMenuOpen(false); }}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left ${isDark ? 'hover:bg-[#2E2E2E] text-[#E0E0E0]' : 'hover:bg-gray-100 text-gray-700'}`}
+              >
+                <Eye className="w-3.5 h-3.5" />
+                Open
+              </button>
+              <button
+                onClick={() => { onMarkDone(event); setIsMenuOpen(false); }}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left ${isDark ? 'hover:bg-[#2E2E2E] text-[#E0E0E0]' : 'hover:bg-gray-100 text-gray-700'}`}
+              >
+                {event.taskStatus === 'done' ? <Circle className="w-3.5 h-3.5" /> : <Check className="w-3.5 h-3.5 text-green-500" />}
+                {event.taskStatus === 'done' ? 'Mark as todo' : 'Mark as done'}
+              </button>
+              <div className={`my-1 border-t ${isDark ? 'border-[#2E2E2E]' : 'border-gray-200'}`} />
+              <button
+                onClick={() => { onDelete(event); setIsMenuOpen(false); }}
+                className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left text-red-500 ${isDark ? 'hover:bg-red-500/10' : 'hover:bg-red-50'}`}
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+);
+IssueBlock.displayName = 'IssueBlock';
+
+// ============ Draggable Issue Block Root (inspired by Plane) ============
+interface IssueBlockRootProps {
+  event: CalendarEvent;
+  onOpen: (event: CalendarEvent) => void;
+  onMarkDone: (event: CalendarEvent) => void;
+  onDelete: (event: CalendarEvent) => void;
+  isDragDisabled: boolean;
+  isDark: boolean;
+}
+
+function IssueBlockRoot({ event, onOpen, onMarkDone, onDelete, isDragDisabled, isDark }: IssueBlockRootProps) {
+  const blockRef = useRef<HTMLDivElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  useEffect(() => {
+    const element = blockRef.current;
+    if (!element) return;
+
+    return combine(
+      draggable({
+        element,
+        canDrag: () => !isDragDisabled && event.isFromApp,
+        getInitialData: () => ({
+          id: event.id,
+          taskId: event.taskId,
+          subtaskId: event.subtaskId,
+          isSubtask: event.isSubtask,
+          date: event.target_date || event.start.split('T')[0],
+        }),
+        onDragStart: () => setIsDragging(true),
+        onDrop: () => setIsDragging(false),
+      })
+    );
+  }, [event, isDragDisabled]);
+
+  return (
+    <IssueBlock
+      ref={blockRef}
+      event={event}
+      isDragging={isDragging}
+      onOpen={onOpen}
+      onMarkDone={onMarkDone}
+      onDelete={onDelete}
+      isDark={isDark}
+    />
+  );
+}
+
+// ============ Calendar Issue Blocks (inspired by Plane) ============
+interface CalendarIssueBlocksProps {
+  date: Date;
+  events: CalendarEvent[];
+  onOpen: (event: CalendarEvent) => void;
+  onMarkDone: (event: CalendarEvent) => void;
+  onDelete: (event: CalendarEvent) => void;
+  onQuickAdd?: () => void;
+  isDragDisabled: boolean;
+  isDark: boolean;
+  enableQuickAdd?: boolean;
+}
+
+function CalendarIssueBlocks({
+  date,
+  events,
+  onOpen,
+  onMarkDone,
+  onDelete,
+  onQuickAdd,
+  isDragDisabled,
+  isDark,
+  enableQuickAdd = true,
+}: CalendarIssueBlocksProps) {
+  const MAX_VISIBLE = 4;
+  const [showAll, setShowAll] = useState(false);
+
+  const visibleEvents = showAll ? events : events.slice(0, MAX_VISIBLE);
+  const hasMore = events.length > MAX_VISIBLE;
+
+  return (
+    <div className="space-y-1">
+      {visibleEvents.map((event) => (
+        <div key={event.id} className="px-1">
+          <IssueBlockRoot
+            event={event}
+            onOpen={onOpen}
+            onMarkDone={onMarkDone}
+            onDelete={onDelete}
+            isDragDisabled={isDragDisabled}
+            isDark={isDark}
+          />
+        </div>
+      ))}
+
+      {/* Quick add button (appears on hover) */}
+      {enableQuickAdd && onQuickAdd && (
+        <div className="px-1 opacity-0 group-hover/day-tile:opacity-100 transition-opacity">
+          <button
+            onClick={onQuickAdd}
+            className={`
+              flex w-full items-center gap-1 px-1.5 py-1 rounded-md text-xs transition-colors
+              ${isDark ? 'text-[#6B6B6B] hover:text-[#A0A0A0] hover:bg-[#1A1A1A]' : 'text-gray-400 hover:text-gray-600 hover:bg-gray-100'}
+            `}
+          >
+            <Plus className="w-3 h-3" />
+            <span>Add task</span>
+          </button>
+        </div>
+      )}
+
+      {/* Load more button */}
+      {hasMore && !showAll && (
+        <div className="px-1">
+          <button
+            onClick={() => setShowAll(true)}
+            className={`text-xs px-1.5 py-0.5 rounded font-medium ${isDark ? 'text-[#5E5CE6] hover:bg-[#5E5CE6]/10' : 'text-indigo-600 hover:bg-indigo-50'}`}
+          >
+            +{events.length - MAX_VISIBLE} more
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ============ Day Tile Component (inspired by Plane) ============
+interface DayTileProps {
+  date: Date;
+  events: CalendarEvent[];
+  isCurrentMonth?: boolean;
+  onOpen: (event: CalendarEvent) => void;
+  onMarkDone: (event: CalendarEvent) => void;
+  onDelete: (event: CalendarEvent) => void;
+  onQuickAdd?: (date: Date) => void;
+  onDrop: (date: Date, sourceData: any) => void;
+  isDragDisabled: boolean;
+  isDark: boolean;
+  isWeekView?: boolean;
+}
+
+function DayTile({
+  date,
+  events,
+  isCurrentMonth = true,
+  onOpen,
+  onMarkDone,
+  onDelete,
+  onQuickAdd,
+  onDrop,
+  isDragDisabled,
+  isDark,
+  isWeekView = false,
+}: DayTileProps) {
+  const tileRef = useRef<HTMLDivElement>(null);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+
+  const isTodayDate = isToday(date);
+  const formattedDate = format(date, 'yyyy-MM-dd');
+
+  // Setup drop target
+  useEffect(() => {
+    const element = tileRef.current;
+    if (!element) return;
+
+    return combine(
+      dropTargetForElements({
+        element,
+        getData: () => ({ date: formattedDate }),
+        onDragEnter: () => setIsDraggingOver(true),
+        onDragLeave: () => setIsDraggingOver(false),
+        onDrop: ({ source }) => {
+          setIsDraggingOver(false);
+          const sourceData = source?.data;
+          if (sourceData) {
+            onDrop(date, sourceData);
+          }
+        },
+      })
+    );
+  }, [date, formattedDate, onDrop]);
+
+  const bgColor = isDraggingOver
+    ? (isDark ? 'bg-[#2E2E2E]' : 'bg-blue-50')
+    : !isCurrentMonth
+      ? (isDark ? 'bg-[#0A0A0A]' : 'bg-gray-50')
+      : '';
+
+  return (
+    <div
+      ref={tileRef}
+      className={`group/day-tile relative flex flex-col h-full w-full ${bgColor} ${isWeekView ? '' : 'min-h-[100px]'}`}
+    >
+      {/* Header with date */}
+      {!isWeekView && (
+        <div className={`flex-shrink-0 flex justify-end px-2 py-1 text-xs ${!isCurrentMonth ? (isDark ? 'text-[#4A4A4A]' : 'text-gray-400') : (isDark ? 'text-[#A0A0A0]' : 'text-gray-600')}`}>
+          {date.getDate() === 1 && format(date, 'MMM') + ' '}
+          {isTodayDate ? (
+            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-[#5E5CE6] text-white font-medium">
+              {date.getDate()}
+            </span>
+          ) : (
+            date.getDate()
+          )}
+        </div>
+      )}
+
+      {/* Events */}
+      <div className={`flex-1 overflow-hidden ${isWeekView ? 'pt-1' : ''}`}>
+        <CalendarIssueBlocks
+          date={date}
+          events={events}
+          onOpen={onOpen}
+          onMarkDone={onMarkDone}
+          onDelete={onDelete}
+          onQuickAdd={onQuickAdd ? () => onQuickAdd(date) : undefined}
+          isDragDisabled={isDragDisabled}
+          isDark={isDark}
+          enableQuickAdd={!!onQuickAdd}
+        />
+      </div>
+    </div>
+  );
+}
+
+// ============ Timeline Event (for week/day view) ============
+interface TimelineEventProps {
+  event: CalendarEvent;
+  top: number;
+  height: number;
+  width: string;
+  left: string;
+  isDragging: boolean;
+  isDark: boolean;
+  onOpen: (event: CalendarEvent) => void;
+  onMarkDone: (event: CalendarEvent) => void;
+  onDelete: (event: CalendarEvent) => void;
+}
+
+const TimelineEvent = React.forwardRef<HTMLDivElement, TimelineEventProps>(
+  ({ event, top, height, width, left, isDragging, isDark, onOpen, onMarkDone, onDelete }, ref) => {
+    const [isMenuOpen, setIsMenuOpen] = useState(false);
+    const menuRef = useRef<HTMLDivElement>(null);
+
+    useEffect(() => {
+      if (!isMenuOpen) return;
+      const handleClickOutside = (e: MouseEvent) => {
+        if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+          setIsMenuOpen(false);
+        }
+      };
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }, [isMenuOpen]);
+
+    const bgColor = event.isSubtask ? 'bg-[#F59E0B]' : event.isFromApp ? 'bg-[#5E5CE6]' : 'bg-[#10B981]';
+
+    return (
+      <div
+        ref={ref}
+        className={`
+          absolute rounded-md px-1.5 py-0.5 overflow-hidden group/timeline-event
+          transition-all cursor-grab select-none
+          ${bgColor}
+          ${event.taskStatus === 'done' ? 'opacity-40' : ''}
+          ${isDragging ? 'ring-2 ring-white/50 shadow-xl scale-105 z-50 cursor-grabbing' : 'hover:ring-1 hover:ring-white/30 hover:shadow-lg z-10'}
+        `}
+        style={{ top: `${top}px`, height: `${height}px`, width, left }}
+        onClick={() => !isDragging && onOpen(event)}
+      >
+        <div className="font-medium text-white truncate pr-5 text-[11px] leading-tight">
+          {event.isSubtask && <span className="opacity-70">↳ </span>}
+          {event.title}
+        </div>
+        {height > 24 && (
+          <div className="text-white/70 text-[9px] leading-tight">
+            {format(parseISO(event.start), 'HH:mm')}
+          </div>
+        )}
+
+        {/* Menu button */}
+        {event.isFromApp && (
+          <div
+            ref={menuRef}
+            className={`absolute top-0.5 right-0.5 ${isMenuOpen ? 'block' : 'opacity-0 group-hover/timeline-event:opacity-100'}`}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <button
+              onClick={() => setIsMenuOpen(!isMenuOpen)}
+              className="p-0.5 rounded bg-black/30 hover:bg-black/50 transition-colors"
+            >
+              <MoreHorizontal className="w-3 h-3 text-white" />
+            </button>
+
+            {isMenuOpen && (
+              <div className={`absolute right-0 top-full mt-1 z-50 py-1 min-w-[140px] rounded-lg shadow-xl border ${isDark ? 'bg-[#1A1A1A] border-[#2E2E2E]' : 'bg-white border-gray-200'}`}>
+                <button
+                  onClick={() => { onOpen(event); setIsMenuOpen(false); }}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left ${isDark ? 'hover:bg-[#2E2E2E] text-[#E0E0E0]' : 'hover:bg-gray-100 text-gray-700'}`}
+                >
+                  <Eye className="w-3.5 h-3.5" />
+                  Open
+                </button>
+                <button
+                  onClick={() => { onMarkDone(event); setIsMenuOpen(false); }}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left ${isDark ? 'hover:bg-[#2E2E2E] text-[#E0E0E0]' : 'hover:bg-gray-100 text-gray-700'}`}
+                >
+                  {event.taskStatus === 'done' ? <Circle className="w-3.5 h-3.5" /> : <Check className="w-3.5 h-3.5 text-green-500" />}
+                  {event.taskStatus === 'done' ? 'Mark as todo' : 'Mark as done'}
+                </button>
+                <div className={`my-1 border-t ${isDark ? 'border-[#2E2E2E]' : 'border-gray-200'}`} />
+                <button
+                  onClick={() => { onDelete(event); setIsMenuOpen(false); }}
+                  className={`w-full flex items-center gap-2 px-3 py-1.5 text-xs text-left text-red-500 ${isDark ? 'hover:bg-red-500/10' : 'hover:bg-red-50'}`}
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                  Delete
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+);
+TimelineEvent.displayName = 'TimelineEvent';
+
+// ============ Draggable Timeline Event Root ============
+interface TimelineEventRootProps {
+  event: CalendarEvent;
+  top: number;
+  height: number;
+  width: string;
+  left: string;
+  day: Date;
+  isDragDisabled: boolean;
+  isDark: boolean;
+  onOpen: (event: CalendarEvent) => void;
+  onMarkDone: (event: CalendarEvent) => void;
+  onDelete: (event: CalendarEvent) => void;
+}
+
+function TimelineEventRoot({
+  event,
+  top,
+  height,
+  width,
+  left,
+  day,
+  isDragDisabled,
+  isDark,
+  onOpen,
+  onMarkDone,
+  onDelete,
+}: TimelineEventRootProps) {
+  const eventRef = useRef<HTMLDivElement>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  useEffect(() => {
+    const element = eventRef.current;
+    if (!element) return;
+
+    return combine(
+      draggable({
+        element,
+        canDrag: () => !isDragDisabled && event.isFromApp,
+        getInitialData: () => ({
+          id: event.id,
+          taskId: event.taskId,
+          subtaskId: event.subtaskId,
+          isSubtask: event.isSubtask,
+          date: format(day, 'yyyy-MM-dd'),
+          hasTime: !event.allDay,
+          start: event.start,
+        }),
+        onDragStart: () => setIsDragging(true),
+        onDrop: () => setIsDragging(false),
+      })
+    );
+  }, [event, day, isDragDisabled]);
+
+  return (
+    <TimelineEvent
+      ref={eventRef}
+      event={event}
+      top={top}
+      height={height}
+      width={width}
+      left={left}
+      isDragging={isDragging}
+      isDark={isDark}
+      onOpen={onOpen}
+      onMarkDone={onMarkDone}
+      onDelete={onDelete}
+    />
+  );
+}
+
+// ============ Timeline Column with Drop Target ============
+interface TimelineColumnProps {
+  day: Date;
+  dayIndex: number;
+  events: CalendarEvent[];
+  isDark: boolean;
+  onOpen: (event: CalendarEvent) => void;
+  onMarkDone: (event: CalendarEvent) => void;
+  onDelete: (event: CalendarEvent) => void;
+  onDrop: (day: Date, y: number, sourceData: any) => void;
+  isDragDisabled: boolean;
+  colors: any;
+}
+
+function TimelineColumn({
+  day,
+  dayIndex,
+  events,
+  isDark,
+  onOpen,
+  onMarkDone,
+  onDelete,
+  onDrop,
+  isDragDisabled,
+  colors,
+}: TimelineColumnProps) {
+  const columnRef = useRef<HTMLDivElement>(null);
+  const [isDraggingOver, setIsDraggingOver] = useState(false);
+  const dropYRef = useRef(0);
+
+  useEffect(() => {
+    const element = columnRef.current;
+    if (!element) return;
+
+    const handleDragOver = (e: DragEvent) => {
+      const rect = element.getBoundingClientRect();
+      dropYRef.current = e.clientY - rect.top;
+    };
+
+    element.addEventListener('dragover', handleDragOver);
+
+    const cleanup = combine(
+      dropTargetForElements({
+        element,
+        getData: () => ({ dayIndex, date: format(day, 'yyyy-MM-dd') }),
+        onDragEnter: () => setIsDraggingOver(true),
+        onDragLeave: () => setIsDraggingOver(false),
+        onDrop: ({ source }) => {
+          setIsDraggingOver(false);
+          const sourceData = source?.data;
+          if (sourceData) {
+            onDrop(day, dropYRef.current, sourceData);
+          }
+        },
+      })
+    );
+
+    return () => {
+      element.removeEventListener('dragover', handleDragOver);
+      cleanup();
+    };
+  }, [day, dayIndex, onDrop]);
+
+  // Calculate event positions
+  const getEventPosition = (event: CalendarEvent) => {
+    const start = parseISO(event.start);
+    const end = parseISO(event.end);
+    const startHour = getHours(start);
+    const startMin = getMinutes(start);
+    const duration = differenceInMinutes(end, start) || 60;
+
+    const top = ((startHour - 7) * 60 + startMin) * (48 / 60);
+    const height = Math.max(duration * (48 / 60), 20);
+
+    return { top, height };
+  };
+
+  const timedEvents = events.filter(e => !e.allDay);
+
+  return (
+    <div
+      ref={columnRef}
+      className={`relative border-l ${colors.borderLight} ${isToday(day) ? 'bg-[#5E5CE6]/5' : ''} ${isDraggingOver ? (isDark ? 'bg-[#2E2E2E]/50' : 'bg-blue-50/50') : ''}`}
+    >
+      {/* Hour lines */}
+      {HOURS.map((hour) => (
+        <div
+          key={hour}
+          className={`absolute w-full border-t ${colors.borderLight} pointer-events-none`}
+          style={{ top: `${(hour - 7) * 48}px` }}
+        />
+      ))}
+
+      {/* Current time indicator */}
+      {isToday(day) && (
+        <div
+          className="absolute w-full h-0.5 bg-[#EF4444] z-20 pointer-events-none"
+          style={{
+            top: `${((getHours(new Date()) - 7) * 60 + getMinutes(new Date())) * (48 / 60)}px`,
+          }}
+        >
+          <div className="absolute -left-1 -top-1 w-2 h-2 bg-[#EF4444] rounded-full" />
+        </div>
+      )}
+
+      {/* Events */}
+      {timedEvents.map((event, i) => {
+        const { top, height } = getEventPosition(event);
+        const width = timedEvents.length > 1 ? `${90 / timedEvents.length}%` : '90%';
+        const left = timedEvents.length > 1 ? `${5 + (i * (90 / timedEvents.length))}%` : '5%';
+
+        return (
+          <TimelineEventRoot
+            key={event.id}
+            event={event}
+            top={top}
+            height={height}
+            width={width}
+            left={left}
+            day={day}
+            isDragDisabled={isDragDisabled}
+            isDark={isDark}
+            onOpen={onOpen}
+            onMarkDone={onMarkDone}
+            onDelete={onDelete}
+          />
+        );
+      })}
+    </div>
+  );
+}
+
+// ============ Main Calendar View Component ============
+export default function CalendarView({
+  tasks = [],
+  subtasks = [],
+  onTaskClick,
+  onSubtaskClick,
+  onEventComplete,
+  onTaskStatusChange,
+  onCreateTask,
+  onDeleteTask,
+  onDeleteSubtask,
+  onTaskMove,
+  onSubtaskMove,
+}: CalendarViewProps) {
   const { theme } = useTheme();
   const isDark = theme === 'dark';
 
@@ -104,6 +747,8 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
   const [selectedDate, setSelectedDate] = useState<Date | null>(new Date());
   const [connected, setConnected] = useState(false);
   const [checkingConnection, setCheckingConnection] = useState(true);
+
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
 
   // Theme colors
   const colors = {
@@ -120,37 +765,21 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     textDimmed: isDark ? 'text-[#4A4A4A]' : 'text-gray-300',
   };
 
-  // Drag to create state
-  const [dragState, setDragState] = useState<DragState>({
-    isDragging: false,
-    startY: 0,
-    currentY: 0,
-    day: null,
-    startHour: 0,
-    startMinutes: 0,
-  });
+  // Enable auto-scroll for drag and drop
+  useEffect(() => {
+    const element = scrollContainerRef.current;
+    if (!element) return;
 
-  // Hover popup state
-  const [hoveredEventId, setHoveredEventId] = useState<string | null>(null);
-  const [popupEventId, setPopupEventId] = useState<string | null>(null);
-  const [popupPosition, setPopupPosition] = useState<{ x: number; y: number } | null>(null);
+    return combine(
+      autoScrollForElements({ element })
+    );
+  }, []);
 
-  // Event drag state (for moving existing events)
-  const [draggingEvent, setDraggingEvent] = useState<CalendarEvent | null>(null);
-  const [dragEventY, setDragEventY] = useState<number>(0);
-  const [dragEventDay, setDragEventDay] = useState<Date | null>(null);
-  const [wasDragging, setWasDragging] = useState(false); // Track if we just finished dragging
-
-  // Selected event state (for keyboard shortcuts)
-  const [selectedEvent, setSelectedEvent] = useState<CalendarEvent | null>(null);
-
-  // Convert tasks to calendar events
-  // Only include active tasks (not backlog/cancelled) to match Active view
+  // Convert tasks to calendar events (only active tasks)
   const taskEvents: CalendarEvent[] = useMemo(() => {
-    const events = tasks
+    return tasks
       .filter(task => task.due_date && task.status !== 'backlog' && task.status !== 'cancelled')
       .map(task => {
-        // Extract just the date part (YYYY-MM-DD) in case due_date includes time
         const startDate = task.due_date!.split('T')[0];
         let startDateTime = startDate;
         let endDateTime = startDate;
@@ -176,25 +805,24 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           taskStatus: task.status,
           isFromApp: true,
           isSubtask: false,
+          target_date: startDate,
         };
       });
-    return events;
   }, [tasks]);
 
-  // Convert subtasks to calendar events (with different color)
+  // Convert subtasks to calendar events
   const subtaskEvents: CalendarEvent[] = useMemo(() => {
     return subtasks
       .filter(subtask => subtask.due_date)
       .map(subtask => {
         const parentTask = tasks.find(t => t.id === subtask.task_id);
-        // Extract just the date part (YYYY-MM-DD) in case due_date includes time
         const startDate = subtask.due_date!.split('T')[0];
         let startDateTime = startDate;
         let endDateTime = startDate;
 
         if (subtask.due_time) {
           startDateTime = `${startDate}T${subtask.due_time}`;
-          const duration = subtask.duration || 30; // Default 30 min for subtasks
+          const duration = subtask.duration || 30;
           const start = parseISO(startDateTime);
           if (!isNaN(start.getTime())) {
             const end = new Date(start.getTime() + duration * 60000);
@@ -215,26 +843,18 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           isFromApp: true,
           isSubtask: true,
           parentTaskTitle: parentTask?.title,
-          color: '#F59E0B', // Orange/amber for subtasks - more distinct from purple tasks
+          color: '#F59E0B',
+          target_date: startDate,
         };
       });
   }, [subtasks, tasks]);
 
-  // Combine events, filtering out Google events that correspond to tasks we already have
-  // This prevents duplicates when tasks are synced to Google Calendar
+  // Combine all events
   const events = useMemo(() => {
-    // Get set of google_calendar_event_ids from our tasks
     const syncedEventIds = new Set(
-      tasks
-        .filter(t => t.google_calendar_event_id)
-        .map(t => t.google_calendar_event_id)
+      tasks.filter(t => t.google_calendar_event_id).map(t => t.google_calendar_event_id)
     );
-
-    // Filter out Google events that are already represented by our tasks
-    const filteredGoogleEvents = googleEvents.filter(
-      ge => !syncedEventIds.has(ge.id)
-    );
-
+    const filteredGoogleEvents = googleEvents.filter(ge => !syncedEventIds.has(ge.id));
     return [...filteredGoogleEvents, ...taskEvents, ...subtaskEvents];
   }, [googleEvents, taskEvents, subtaskEvents, tasks]);
 
@@ -252,13 +872,10 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     };
     checkConnection();
 
-    // Also check if we just connected (from URL param)
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
       if (params.get('google_connected') === 'true') {
-        // Remove the param from URL without reload
         window.history.replaceState({}, '', window.location.pathname);
-        // Re-check connection after a short delay
         setTimeout(checkConnection, 500);
       }
     }
@@ -342,244 +959,77 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
   // Connect Google Calendar
   const handleConnectCalendar = async () => {
     try {
-      console.log('[CalendarView] Connecting to Google Calendar...');
       const authUrl = await connectGoogleCalendar();
-      console.log('[CalendarView] Auth URL received:', authUrl);
-      if (authUrl) {
-        console.log('[CalendarView] Redirecting to:', authUrl);
-        window.location.href = authUrl;
-      } else {
-        console.error('[CalendarView] No auth URL received');
-      }
+      if (authUrl) window.location.href = authUrl;
     } catch (error) {
       console.error('Error connecting to Google Calendar:', error);
     }
   };
 
-  // Mark as done
-  const handleMarkAsDone = async (event: CalendarEvent, e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    if (!event.taskId || !onTaskStatusChange) return;
-
-    if (event.isSubtask && event.subtaskId) {
-      // For subtasks, we need to update subtask status
-      // This will be handled by parent component
-      onTaskStatusChange(event.subtaskId, event.taskStatus === 'done' ? 'todo' : 'done');
-    } else {
-      onTaskStatusChange(event.taskId, event.taskStatus === 'done' ? 'todo' : 'done');
-    }
-    if (onEventComplete) onEventComplete(event.id, event.taskId);
-    setPopupEventId(null);
-  };
-
-  // Delete event
-  const handleDeleteEvent = async (event: CalendarEvent, e?: React.MouseEvent) => {
-    e?.stopPropagation();
-    if (event.isSubtask && event.subtaskId && onDeleteSubtask) {
-      onDeleteSubtask(event.subtaskId);
-    } else if (event.taskId && onDeleteTask) {
-      onDeleteTask(event.taskId);
-    }
-    setPopupEventId(null);
-  };
-
-  // Open event details
-  const handleOpenEvent = (event: CalendarEvent, e?: React.MouseEvent) => {
-    e?.stopPropagation();
+  // Event handlers
+  const handleOpenEvent = (event: CalendarEvent) => {
     if (event.isSubtask && event.subtaskId && event.taskId) {
       onSubtaskClick?.(event.subtaskId, event.taskId);
     } else if (event.taskId) {
       onTaskClick?.(event.taskId);
     }
-    setPopupEventId(null);
   };
 
-  // Show popup for event
-  const handleShowPopup = (event: CalendarEvent, e: React.MouseEvent) => {
-    e.stopPropagation();
-    e.preventDefault();
-    const rect = (e.target as HTMLElement).getBoundingClientRect();
-    setPopupPosition({ x: rect.left + rect.width / 2, y: rect.bottom + 8 });
-    setPopupEventId(event.id);
-  };
-
-  // Close popup when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      if (!target.closest('[data-event-popup]') && !target.closest('[data-event-popup-trigger]')) {
-        setPopupEventId(null);
-      }
-    };
-    document.addEventListener('click', handleClickOutside);
-    return () => document.removeEventListener('click', handleClickOutside);
-  }, []);
-
-  // Handle Delete key to delete selected event
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Delete' || e.key === 'Backspace') {
-        // Don't delete if user is typing in an input or editable element
-        const activeEl = document.activeElement;
-        if (activeEl?.tagName === 'INPUT' ||
-            activeEl?.tagName === 'TEXTAREA' ||
-            (activeEl as HTMLElement)?.isContentEditable) {
-          return;
-        }
-
-        if (selectedEvent && selectedEvent.isFromApp) {
-          e.preventDefault();
-          e.stopPropagation();
-
-          if (selectedEvent.isSubtask && selectedEvent.subtaskId && onDeleteSubtask) {
-            onDeleteSubtask(selectedEvent.subtaskId);
-          } else if (selectedEvent.taskId && onDeleteTask) {
-            onDeleteTask(selectedEvent.taskId);
-          }
-          setSelectedEvent(null);
-        }
-      } else if (e.key === 'Escape') {
-        setSelectedEvent(null);
-        setPopupEventId(null);
-      }
-    };
-    document.addEventListener('keydown', handleKeyDown, true); // Use capture phase
-    return () => document.removeEventListener('keydown', handleKeyDown, true);
-  }, [selectedEvent, onDeleteTask, onDeleteSubtask]);
-
-  // Dragging event position for visual feedback (rendered as overlay)
-  const [dragEventX, setDragEventX] = useState<number>(0);
-  const [dragEventScreenY, setDragEventScreenY] = useState<number>(0); // Absolute screen Y for overlay
-
-  // Reference to track current dragEventY for the global handler
-  const dragEventYRef = useRef(dragEventY);
-  const dragEventDayRef = useRef<Date | null>(dragEventDay);
-
-  // Keep refs in sync
-  useEffect(() => {
-    dragEventYRef.current = dragEventY;
-  }, [dragEventY]);
-
-  useEffect(() => {
-    dragEventDayRef.current = dragEventDay;
-  }, [dragEventDay]);
-
-  // Handle global mouse events for event dragging
-  useEffect(() => {
-    if (!draggingEvent) return;
-
-    const handleGlobalMouseMove = (e: MouseEvent) => {
-      // Store global mouse position for overlay rendering
-      setDragEventX(e.clientX);
-      setDragEventScreenY(e.clientY); // Always store absolute screen position
-
-      // Find the timeline column under the mouse
-      const element = document.elementFromPoint(e.clientX, e.clientY);
-      const timeline = element?.closest('[data-timeline]') as HTMLElement;
-
-      if (timeline) {
-        const rect = timeline.getBoundingClientRect();
-        const newY = e.clientY - rect.top;
-        setDragEventY(newY); // Relative Y for time calculation
-
-        // Get day index from data attribute for reliable cross-day dragging
-        const dayIndexAttr = timeline.getAttribute('data-day-index');
-        if (dayIndexAttr !== null) {
-          const dayIndex = parseInt(dayIndexAttr, 10);
-          if (dayIndex >= 0 && dayIndex < 7) {
-            const weekStart = startOfWeek(currentDate, { weekStartsOn: 1 });
-            const newDay = addDays(weekStart, dayIndex);
-            setDragEventDay(newDay);
-          }
-        } else if (viewMode === 'day') {
-          // Day view - keep the current date
-          setDragEventDay(currentDate);
-        }
-      }
-      // Note: Don't update dragEventY when outside timeline - keep the last valid position
-    };
-
-    const handleGlobalMouseUp = () => {
-      const currentY = dragEventYRef.current;
-      const currentDay = dragEventDayRef.current;
-
-      if (draggingEvent && currentDay) {
-        const { hour, minutes } = yToTime(currentY);
-        const due_date = format(currentDay, 'yyyy-MM-dd');
-        const due_time = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-
-        if (draggingEvent.isSubtask && draggingEvent.subtaskId && onSubtaskMove) {
-          onSubtaskMove(draggingEvent.subtaskId, { due_date, due_time });
-        } else if (draggingEvent.taskId && onTaskMove) {
-          onTaskMove(draggingEvent.taskId, { due_date, due_time });
-        }
-      }
-      setDraggingEvent(null);
-      setDragEventDay(null);
-      // Set wasDragging to prevent click from firing after drag
-      setWasDragging(true);
-      setTimeout(() => setWasDragging(false), 100);
-    };
-
-    document.addEventListener('mousemove', handleGlobalMouseMove);
-    document.addEventListener('mouseup', handleGlobalMouseUp);
-    return () => {
-      document.removeEventListener('mousemove', handleGlobalMouseMove);
-      document.removeEventListener('mouseup', handleGlobalMouseUp);
-    };
-  }, [draggingEvent, currentDate, viewMode, onTaskMove, onSubtaskMove]);
-
-  // Handle event drag start
-  const handleEventDragStart = (event: CalendarEvent, e: React.MouseEvent, day: Date) => {
-    // Only allow dragging if we have a taskId or subtaskId to update
-    if (!event.isFromApp || (!event.taskId && !event.subtaskId)) {
-      return;
+  const handleMarkDone = (event: CalendarEvent) => {
+    if (!event.taskId || !onTaskStatusChange) return;
+    const newStatus = event.taskStatus === 'done' ? 'todo' : 'done';
+    if (event.isSubtask && event.subtaskId) {
+      onTaskStatusChange(event.subtaskId, newStatus);
+    } else {
+      onTaskStatusChange(event.taskId, newStatus);
     }
-    e.preventDefault();
-    e.stopPropagation();
-    setDraggingEvent(event);
-    setDragEventDay(day);
-    setDragEventX(e.clientX);
-    setDragEventScreenY(e.clientY); // Store absolute screen position
-    // Get the timeline container, not the event element
-    const timeline = e.currentTarget.closest('[data-timeline]') as HTMLElement;
-    if (timeline) {
-      const rect = timeline.getBoundingClientRect();
-      const y = e.clientY - rect.top;
-      setDragEventY(y);
+    if (onEventComplete && event.taskId) onEventComplete(event.id, event.taskId);
+  };
+
+  const handleDeleteEvent = (event: CalendarEvent) => {
+    if (event.isSubtask && event.subtaskId && onDeleteSubtask) {
+      onDeleteSubtask(event.subtaskId);
+    } else if (event.taskId && onDeleteTask) {
+      onDeleteTask(event.taskId);
     }
   };
 
-  // Handle event drag move
-  const handleEventDragMove = (e: React.MouseEvent, day: Date) => {
-    if (!draggingEvent) return;
-    const rect = e.currentTarget.getBoundingClientRect();
-    setDragEventY(e.clientY - rect.top);
-    setDragEventDay(day);
+  // Handle quick add
+  const handleQuickAdd = (date: Date) => {
+    if (!onCreateTask) return;
+    onCreateTask({ due_date: format(date, 'yyyy-MM-dd') });
   };
 
-  // Handle event drag end
-  const handleEventDragEnd = () => {
-    if (!draggingEvent || !dragEventDay) {
-      setDraggingEvent(null);
-      return;
+  // Handle drop on day tile (month view)
+  const handleDayDrop = (targetDate: Date, sourceData: any) => {
+    const { taskId, subtaskId, isSubtask, date: sourceDate } = sourceData;
+    const targetDateStr = format(targetDate, 'yyyy-MM-dd');
+
+    if (sourceDate === targetDateStr) return;
+
+    if (isSubtask && subtaskId && onSubtaskMove) {
+      onSubtaskMove(subtaskId, { due_date: targetDateStr });
+    } else if (taskId && onTaskMove) {
+      onTaskMove(taskId, { due_date: targetDateStr });
     }
+  };
 
-    const { hour, minutes } = yToTime(dragEventY);
-    const due_date = format(dragEventDay, 'yyyy-MM-dd');
-    const due_time = `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
+  // Handle drop on timeline (week/day view) - includes time
+  const handleTimelineDrop = (targetDay: Date, y: number, sourceData: any) => {
+    const { taskId, subtaskId, isSubtask } = sourceData;
+    const targetDateStr = format(targetDay, 'yyyy-MM-dd');
 
-    if (draggingEvent.isSubtask && draggingEvent.subtaskId && onSubtaskMove) {
-      onSubtaskMove(draggingEvent.subtaskId, { due_date, due_time });
-    } else if (draggingEvent.taskId && onTaskMove) {
-      onTaskMove(draggingEvent.taskId, { due_date, due_time });
+    // Convert Y to time (48px per hour, starting at 7am)
+    const totalMinutes = (y / 48) * 60;
+    const hour = Math.min(Math.max(Math.floor(totalMinutes / 60) + 7, 7), 23);
+    const minutes = Math.round((totalMinutes % 60) / 15) * 15;
+    const due_time = `${String(hour).padStart(2, '0')}:${String(Math.min(minutes, 45)).padStart(2, '0')}`;
+
+    if (isSubtask && subtaskId && onSubtaskMove) {
+      onSubtaskMove(subtaskId, { due_date: targetDateStr, due_time });
+    } else if (taskId && onTaskMove) {
+      onTaskMove(taskId, { due_date: targetDateStr, due_time });
     }
-
-    setDraggingEvent(null);
-    setDragEventDay(null);
-    // Set wasDragging to prevent click from firing after drag
-    setWasDragging(true);
-    setTimeout(() => setWasDragging(false), 100);
   };
 
   // Get events for a day
@@ -626,293 +1076,6 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
     return format(currentDate, 'MMMM yyyy');
   };
 
-  // Calculate event position in timeline
-  const getEventPosition = (event: CalendarEvent) => {
-    const start = parseISO(event.start);
-    const end = parseISO(event.end);
-    const startHour = getHours(start);
-    const startMin = getMinutes(start);
-    const duration = differenceInMinutes(end, start) || 60;
-
-    const top = ((startHour - 7) * 60 + startMin) * (48 / 60); // 48px per hour
-    const height = Math.max(duration * (48 / 60), 20);
-
-    return { top, height };
-  };
-
-  // Convert Y position to time (48px per hour)
-  const yToTime = (y: number) => {
-    const totalMinutes = (y / 48) * 60;
-    const hour = Math.floor(totalMinutes / 60) + 7; // Start at 7am
-    const minutes = Math.round((totalMinutes % 60) / 15) * 15; // Round to 15min
-    return { hour: Math.min(Math.max(hour, 7), 23), minutes: Math.min(minutes, 45) };
-  };
-
-  // Handle mouse down on timeline to start drag
-  const handleTimelineMouseDown = (e: React.MouseEvent, day: Date) => {
-    if (!onCreateTask) return;
-
-    const rect = e.currentTarget.getBoundingClientRect();
-    const y = e.clientY - rect.top;
-    const { hour, minutes } = yToTime(y);
-
-    setDragState({
-      isDragging: true,
-      startY: y,
-      currentY: y,
-      day,
-      startHour: hour,
-      startMinutes: minutes,
-    });
-  };
-
-  // Handle mouse move during drag
-  const handleTimelineMouseMove = (e: React.MouseEvent) => {
-    if (!dragState.isDragging) return;
-
-    const rect = e.currentTarget.getBoundingClientRect();
-    const y = Math.max(0, e.clientY - rect.top);
-
-    setDragState(prev => ({
-      ...prev,
-      currentY: y,
-    }));
-  };
-
-  // Handle mouse up to complete drag
-  // DISABLED: Task creation by drag is disabled to prevent accidental task creation
-  const handleTimelineMouseUp = () => {
-    // Always reset drag state - never create tasks
-    setDragState({
-      isDragging: false,
-      startY: 0,
-      currentY: 0,
-      day: null,
-      startHour: 0,
-      startMinutes: 0,
-    });
-    return;
-
-    // OLD CODE - DISABLED
-    /*
-    if (!dragState.isDragging || !dragState.day || !onCreateTask) {
-      setDragState(prev => ({ ...prev, isDragging: false }));
-      return;
-    }
-
-    const startY = Math.min(dragState.startY, dragState.currentY);
-    const endY = Math.max(dragState.startY, dragState.currentY);
-
-    // Require minimum drag distance of 48px (1 hour) to create a task (prevents accidental creation)
-    const dragDistance = Math.abs(dragState.currentY - dragState.startY);
-    if (dragDistance < 48) {
-      setDragState({
-        isDragging: false,
-        startY: 0,
-        currentY: 0,
-        day: null,
-        startHour: 0,
-        startMinutes: 0,
-      });
-      return;
-    }
-    */
-
-    const startTime = yToTime(startY);
-    const endTime = yToTime(endY);
-
-    // Calculate duration in minutes
-    const startMinutes = startTime.hour * 60 + startTime.minutes;
-    const endMinutes = endTime.hour * 60 + endTime.minutes;
-    const duration = Math.max(endMinutes - startMinutes, 15); // Minimum 15 minutes
-
-    // Format date and time
-    const due_date = format(dragState.day, 'yyyy-MM-dd');
-    const due_time = `${String(startTime.hour).padStart(2, '0')}:${String(startTime.minutes).padStart(2, '0')}`;
-
-    // Reset drag state
-    setDragState({
-      isDragging: false,
-      startY: 0,
-      currentY: 0,
-      day: null,
-      startHour: 0,
-      startMinutes: 0,
-    });
-
-    // Create task
-    onCreateTask({ due_date, due_time, duration });
-  };
-
-  // Get drag preview position and height
-  const getDragPreview = () => {
-    if (!dragState.isDragging) return null;
-
-    const top = Math.min(dragState.startY, dragState.currentY);
-    const height = Math.max(Math.abs(dragState.currentY - dragState.startY), 12);
-
-    const startTime = yToTime(Math.min(dragState.startY, dragState.currentY));
-    const endTime = yToTime(Math.max(dragState.startY, dragState.currentY));
-
-    return {
-      top,
-      height,
-      startTime: `${String(startTime.hour).padStart(2, '0')}:${String(startTime.minutes).padStart(2, '0')}`,
-      endTime: `${String(endTime.hour).padStart(2, '0')}:${String(endTime.minutes).padStart(2, '0')}`,
-    };
-  };
-
-  // Render timeline event
-  const renderTimelineEvent = (event: CalendarEvent, index: number, total: number, day: Date) => {
-    if (event.allDay) return null;
-
-    const { top, height } = getEventPosition(event);
-    const width = total > 1 ? `${90 / total}%` : '90%';
-    const left = total > 1 ? `${5 + (index * (90 / total))}%` : '5%';
-    const isHovered = hoveredEventId === event.id;
-    const isPopupOpen = popupEventId === event.id;
-    const isDragging = draggingEvent?.id === event.id;
-    const isSelected = selectedEvent?.id === event.id;
-
-    // Calculate position for dragging event
-    const displayTop = isDragging ? dragEventY : top;
-
-    // Don't render in column if being dragged to different day - will be rendered as overlay
-    if (isDragging && dragEventDay && !isSameDay(dragEventDay, day)) {
-      return null;
-    }
-
-    return (
-      <div
-        key={event.id}
-        data-calendar-event
-        className={`
-          absolute rounded px-1.5 py-0.5 overflow-hidden
-          transition-all group select-none
-          ${event.isSubtask ? 'bg-[#F59E0B]' : event.isFromApp ? 'bg-[#5E5CE6]' : 'bg-[#10B981]'}
-          ${event.taskStatus === 'done' ? 'opacity-40' : ''}
-          ${isSelected ? 'ring-2 ring-white shadow-lg scale-[1.02] z-40' : ''}
-          ${isDragging ? 'ring-2 ring-white/50 shadow-xl scale-[1.05] z-50 cursor-grabbing' :
-            isHovered || isPopupOpen ? 'ring-2 ring-white/30 shadow-lg scale-[1.02] z-30 cursor-grab' :
-            'hover:ring-2 hover:ring-white/20 hover:shadow-md z-10 cursor-grab'}
-        `}
-        style={{ top: `${displayTop}px`, height: `${height}px`, width, left }}
-        onMouseEnter={() => !draggingEvent && setHoveredEventId(event.id)}
-        onMouseLeave={() => !draggingEvent && setHoveredEventId(null)}
-        onMouseDown={(e) => {
-          e.stopPropagation(); // Prevent timeline from starting task creation
-          if (event.isFromApp && (onTaskMove || onSubtaskMove)) {
-            handleEventDragStart(event, e, day);
-          }
-        }}
-        onClick={(e) => {
-          e.stopPropagation();
-          if (!draggingEvent && !wasDragging) {
-            // Select the event (for keyboard shortcuts like Delete)
-            setSelectedEvent(event);
-          }
-        }}
-        onDoubleClick={(e) => {
-          e.stopPropagation();
-          if (!draggingEvent && !wasDragging) {
-            handleOpenEvent(event, e);
-          }
-        }}
-      >
-        {/* Event content */}
-        <div className="font-medium text-white truncate pr-4 text-[11px] leading-tight">
-          {event.isSubtask && <span className="opacity-70">↳ </span>}
-          {event.title}
-        </div>
-        {height > 24 && (
-          <div className="text-white/70 text-[9px] leading-tight">
-            {format(parseISO(event.start), 'HH:mm')}
-          </div>
-        )}
-
-        {/* Quick action button (appears on hover) - only show menu button to save space */}
-        {event.isFromApp && (
-          <button
-            data-event-popup-trigger
-            onClick={(e) => handleShowPopup(event, e)}
-            className={`
-              absolute top-0.5 right-0.5 p-0.5 rounded
-              bg-black/30 hover:bg-black/50 transition-all
-              ${isSelected || isHovered || isPopupOpen ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'}
-            `}
-          >
-            <MoreHorizontal className="w-3 h-3 text-white" />
-          </button>
-        )}
-
-        {/* Popup menu */}
-        {isPopupOpen && popupPosition && (
-          <div
-            data-event-popup
-            className={`
-              fixed z-50 py-1 min-w-[160px] rounded-lg shadow-xl border
-              ${isDark ? 'bg-[#1A1A1A] border-[#2E2E2E]' : 'bg-white border-gray-200'}
-            `}
-            style={{
-              left: `${popupPosition.x}px`,
-              top: `${popupPosition.y}px`,
-              transform: 'translateX(-50%)',
-            }}
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* Open details */}
-            <button
-              onClick={(e) => handleOpenEvent(event, e)}
-              className={`
-                w-full flex items-center gap-2 px-3 py-2 text-sm text-left
-                ${isDark ? 'hover:bg-[#2E2E2E] text-[#E0E0E0]' : 'hover:bg-gray-100 text-gray-700'}
-              `}
-            >
-              <Eye className="w-4 h-4" />
-              Open details
-            </button>
-
-            {/* Mark as done / undone */}
-            <button
-              onClick={(e) => handleMarkAsDone(event, e)}
-              className={`
-                w-full flex items-center gap-2 px-3 py-2 text-sm text-left
-                ${isDark ? 'hover:bg-[#2E2E2E] text-[#E0E0E0]' : 'hover:bg-gray-100 text-gray-700'}
-              `}
-            >
-              {event.taskStatus === 'done' ? (
-                <>
-                  <Circle className="w-4 h-4" />
-                  Mark as todo
-                </>
-              ) : (
-                <>
-                  <Check className="w-4 h-4 text-green-500" />
-                  Mark as done
-                </>
-              )}
-            </button>
-
-            {/* Divider */}
-            <div className={`my-1 border-t ${isDark ? 'border-[#2E2E2E]' : 'border-gray-200'}`} />
-
-            {/* Delete */}
-            <button
-              onClick={(e) => handleDeleteEvent(event, e)}
-              className={`
-                w-full flex items-center gap-2 px-3 py-2 text-sm text-left text-red-500
-                ${isDark ? 'hover:bg-red-500/10' : 'hover:bg-red-50'}
-              `}
-            >
-              <Trash2 className="w-4 h-4" />
-              Delete {event.isSubtask ? 'subtask' : 'task'}
-            </button>
-          </div>
-        )}
-      </div>
-    );
-  };
-
   const selectedDateEvents = selectedDate ? getEventsForDay(selectedDate) : [];
 
   return (
@@ -920,74 +1083,50 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
       {/* Header */}
       <div className={`flex items-center justify-between px-6 py-3 border-b ${colors.border}`}>
         <div className="flex items-center gap-4">
-          {/* Navigation */}
           <div className="flex items-center gap-1">
-            <button
-              onClick={goToPrevious}
-              className={`p-1.5 ${colors.bgHover} rounded transition-colors`}
-            >
+            <button onClick={goToPrevious} className={`p-1.5 ${colors.bgHover} rounded transition-colors`}>
               <ChevronLeft className={`w-4 h-4 ${colors.textMuted}`} />
             </button>
-            <button
-              onClick={goToNext}
-              className={`p-1.5 ${colors.bgHover} rounded transition-colors`}
-            >
+            <button onClick={goToNext} className={`p-1.5 ${colors.bgHover} rounded transition-colors`}>
               <ChevronRight className={`w-4 h-4 ${colors.textMuted}`} />
             </button>
           </div>
 
-          {/* Title */}
-          <h1 className={`text-sm font-medium ${colors.text} min-w-[200px]`}>
-            {getTitle()}
-          </h1>
+          <h1 className={`text-sm font-medium ${colors.text} min-w-[200px]`}>{getTitle()}</h1>
 
-          {/* Today button */}
           <button
             onClick={goToToday}
-            className={`
-              px-2.5 py-1 text-xs font-medium rounded transition-colors
-              ${isToday(currentDate)
-                ? 'bg-[#5E5CE6] text-white'
-                : `${colors.textSecondary} hover:${colors.text} ${colors.bgHover}`
-              }
-            `}
+            className={`px-2.5 py-1 text-xs font-medium rounded transition-colors ${
+              isToday(currentDate) ? 'bg-[#5E5CE6] text-white' : `${colors.textSecondary} ${colors.bgHover}`
+            }`}
           >
             Today
           </button>
         </div>
 
         <div className="flex items-center gap-3">
-          {/* View mode switcher */}
           <div className={`flex items-center ${colors.bgSecondary} rounded-lg p-0.5`}>
             {(['day', 'week', 'month'] as ViewMode[]).map((mode) => (
               <button
                 key={mode}
                 onClick={() => setViewMode(mode)}
-                className={`
-                  px-3 py-1 text-xs font-medium rounded-md transition-colors capitalize
-                  ${viewMode === mode
+                className={`px-3 py-1 text-xs font-medium rounded-md transition-colors capitalize ${
+                  viewMode === mode
                     ? `${isDark ? 'bg-[#2E2E2E]' : 'bg-white shadow-sm'} ${colors.text}`
                     : `${colors.textMuted} hover:${colors.textSecondary}`
-                  }
-                `}
+                }`}
               >
                 {mode}
               </button>
             ))}
           </div>
 
-          {/* Refresh */}
           {connected && (
-            <button
-              onClick={fetchGoogleEvents}
-              disabled={loading}
-              className={`p-1.5 ${colors.bgHover} rounded transition-colors`}
-            >
+            <button onClick={fetchGoogleEvents} disabled={loading} className={`p-1.5 ${colors.bgHover} rounded transition-colors`}>
               <RefreshCw className={`w-4 h-4 ${colors.textMuted} ${loading ? 'animate-spin' : ''}`} />
             </button>
           )}
 
-          {/* Connection status */}
           {!checkingConnection && (
             connected ? (
               <div className="flex items-center gap-1.5 px-2.5 py-1 bg-[#10B981]/10 rounded">
@@ -997,7 +1136,7 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
             ) : (
               <button
                 onClick={handleConnectCalendar}
-                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs ${colors.textSecondary} hover:${colors.text} ${colors.bgHover} rounded transition-colors`}
+                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs ${colors.textSecondary} ${colors.bgHover} rounded transition-colors`}
               >
                 <Link2 className="w-3.5 h-3.5" />
                 Connect
@@ -1008,17 +1147,12 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
       </div>
 
       {/* Content */}
-      <div className="flex flex-1 overflow-hidden" onClick={(e) => {
-        // Only deselect if clicking directly on the background, not on events
-        if ((e.target as HTMLElement).closest('[data-calendar-event]')) return;
-        setSelectedEvent(null);
-      }}>
+      <div className="flex flex-1 overflow-hidden">
         {/* Main Calendar Area */}
         <div className="flex-1 overflow-hidden">
           {viewMode === 'month' ? (
             // Month View
             <div className="h-full flex flex-col">
-              {/* Day headers */}
               <div className={`grid grid-cols-7 border-b ${colors.border}`}>
                 {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map(day => (
                   <div key={day} className="py-2 text-center">
@@ -1027,53 +1161,31 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
                 ))}
               </div>
 
-              {/* Calendar grid */}
-              <div className="flex-1 grid grid-cols-7 grid-rows-6">
+              <div className="flex-1 grid grid-cols-7 auto-rows-fr overflow-auto" ref={scrollContainerRef}>
                 {calendarDays.map((day, index) => {
                   const dayEvents = getEventsForDay(day);
                   const isCurrentMonth = isSameMonth(day, currentDate);
-                  const isSelected = selectedDate && isSameDay(day, selectedDate);
-                  const isTodayDate = isToday(day);
 
                   return (
                     <div
                       key={index}
+                      className={`border-r border-b ${colors.borderLight} ${
+                        selectedDate && isSameDay(day, selectedDate) ? colors.bgSelected : ''
+                      }`}
                       onClick={() => setSelectedDate(day)}
-                      className={`
-                        border-r border-b ${colors.borderLight} p-1 cursor-pointer transition-colors
-                        ${!isCurrentMonth ? (isDark ? 'bg-[#0A0A0A]' : 'bg-gray-50') : ''}
-                        ${isSelected ? colors.bgSelected : ''}
-                        ${isDark ? 'hover:bg-[#1A1A1A]' : 'hover:bg-gray-100'}
-                      `}
                     >
-                      <div className="flex items-center justify-center mb-1">
-                        <span
-                          className={`
-                            w-6 h-6 flex items-center justify-center text-xs rounded-full
-                            ${isTodayDate ? 'bg-[#5E5CE6] text-white font-medium' : ''}
-                            ${!isCurrentMonth ? colors.textDimmed : colors.textSecondary}
-                          `}
-                        >
-                          {format(day, 'd')}
-                        </span>
-                      </div>
-                      <div className="space-y-0.5">
-                        {dayEvents.slice(0, 3).map(event => (
-                          <div
-                            key={event.id}
-                            className={`
-                              text-[10px] px-1 py-0.5 rounded truncate
-                              ${event.isFromApp ? 'bg-[#5E5CE6]/20 text-[#818CF8]' : (isDark ? 'bg-[#2E2E2E] text-[#A0A0A0]' : 'bg-gray-200 text-gray-600')}
-                              ${event.taskStatus === 'done' ? 'line-through opacity-50' : ''}
-                            `}
-                          >
-                            {event.title}
-                          </div>
-                        ))}
-                        {dayEvents.length > 3 && (
-                          <div className={`text-[10px] ${colors.textMuted} px-1`}>+{dayEvents.length - 3}</div>
-                        )}
-                      </div>
+                      <DayTile
+                        date={day}
+                        events={dayEvents}
+                        isCurrentMonth={isCurrentMonth}
+                        onOpen={handleOpenEvent}
+                        onMarkDone={handleMarkDone}
+                        onDelete={handleDeleteEvent}
+                        onQuickAdd={onCreateTask ? handleQuickAdd : undefined}
+                        onDrop={handleDayDrop}
+                        isDragDisabled={false}
+                        isDark={isDark}
+                      />
                     </div>
                   );
                 })}
@@ -1082,9 +1194,8 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           ) : viewMode === 'week' ? (
             // Week View
             <div className="h-full flex flex-col">
-              {/* Day headers */}
               <div className={`grid grid-cols-8 border-b ${colors.border}`}>
-                <div className="w-14" /> {/* Time column spacer */}
+                <div className="w-14" />
                 {weekDays.map((day, i) => (
                   <div
                     key={i}
@@ -1092,20 +1203,15 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
                     onClick={() => setSelectedDate(day)}
                   >
                     <div className={`text-xs ${colors.textMuted}`}>{format(day, 'EEE')}</div>
-                    <div className={`
-                      text-lg font-medium mt-0.5
-                      ${isToday(day) ? 'text-[#5E5CE6]' : colors.text}
-                    `}>
+                    <div className={`text-lg font-medium mt-0.5 ${isToday(day) ? 'text-[#5E5CE6]' : colors.text}`}>
                       {format(day, 'd')}
                     </div>
                   </div>
                 ))}
               </div>
 
-              {/* Timeline grid */}
-              <div className="flex-1 overflow-auto">
+              <div className="flex-1 overflow-auto" ref={scrollContainerRef}>
                 <div className="grid grid-cols-8 min-h-full" style={{ height: `${HOURS.length * 48}px` }}>
-                  {/* Time labels */}
                   <div className="w-14 relative">
                     {HOURS.map((hour) => (
                       <div
@@ -1118,90 +1224,29 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
                     ))}
                   </div>
 
-                  {/* Day columns */}
-                  {weekDays.map((day, dayIndex) => {
-                    const dayEvents = getEventsForDay(day).filter(e => !e.allDay);
-                    const dragPreview = getDragPreview();
-                    const isThisDayDragging = dragState.isDragging && dragState.day && isSameDay(dragState.day, day);
-
-                    return (
-                      <div
-                        key={dayIndex}
-                        data-timeline
-                        data-day-index={dayIndex}
-                        className={`relative border-l ${colors.borderLight} ${isToday(day) ? 'bg-[#5E5CE6]/5' : ''} ${draggingEvent ? 'cursor-grabbing' : onCreateTask ? 'cursor-crosshair' : ''}`}
-                        onMouseDown={(e) => {
-                          if (!draggingEvent) handleTimelineMouseDown(e, day);
-                        }}
-                        onMouseMove={(e) => {
-                          if (draggingEvent) {
-                            handleEventDragMove(e, day);
-                          } else {
-                            handleTimelineMouseMove(e);
-                          }
-                        }}
-                        onMouseUp={() => {
-                          if (draggingEvent) {
-                            handleEventDragEnd();
-                          } else {
-                            handleTimelineMouseUp();
-                          }
-                        }}
-                        onMouseLeave={() => {
-                          if (dragState.isDragging) handleTimelineMouseUp();
-                        }}
-                      >
-                        {/* Hour lines */}
-                        {HOURS.map((hour) => (
-                          <div
-                            key={hour}
-                            className={`absolute w-full border-t ${colors.borderLight} pointer-events-none`}
-                            style={{ top: `${(hour - 7) * 48}px` }}
-                          />
-                        ))}
-
-                        {/* Drag preview */}
-                        {isThisDayDragging && dragPreview && (
-                          <div
-                            className="absolute left-1 right-1 bg-[#5E5CE6]/30 border-2 border-[#5E5CE6] border-dashed rounded-md pointer-events-none z-20"
-                            style={{
-                              top: `${dragPreview.top}px`,
-                              height: `${Math.max(dragPreview.height, 24)}px`,
-                            }}
-                          >
-                            <div className="px-2 py-0.5 text-xs text-[#5E5CE6] font-medium">
-                              {dragPreview.startTime} - {dragPreview.endTime}
-                            </div>
-                          </div>
-                        )}
-
-                        {/* Current time indicator */}
-                        {isToday(day) && (
-                          <div
-                            className="absolute w-full h-0.5 bg-[#EF4444] z-10 pointer-events-none"
-                            style={{
-                              top: `${((getHours(new Date()) - 7) * 60 + getMinutes(new Date())) * (48 / 60)}px`,
-                            }}
-                          >
-                            <div className="absolute -left-1 -top-1 w-2 h-2 bg-[#EF4444] rounded-full" />
-                          </div>
-                        )}
-
-                        {/* Events */}
-                        {dayEvents.map((event, i) => renderTimelineEvent(event, i, dayEvents.length, day))}
-                      </div>
-                    );
-                  })}
+                  {weekDays.map((day, dayIndex) => (
+                    <TimelineColumn
+                      key={dayIndex}
+                      day={day}
+                      dayIndex={dayIndex}
+                      events={getEventsForDay(day)}
+                      isDark={isDark}
+                      onOpen={handleOpenEvent}
+                      onMarkDone={handleMarkDone}
+                      onDelete={handleDeleteEvent}
+                      onDrop={handleTimelineDrop}
+                      isDragDisabled={false}
+                      colors={colors}
+                    />
+                  ))}
                 </div>
               </div>
             </div>
           ) : (
             // Day View
             <div className="h-full flex">
-              {/* Timeline */}
-              <div className="flex-1 overflow-auto">
+              <div className="flex-1 overflow-auto" ref={scrollContainerRef}>
                 <div className="relative" style={{ height: `${HOURS.length * 48}px` }}>
-                  {/* Time labels */}
                   {HOURS.map((hour) => (
                     <div
                       key={hour}
@@ -1212,76 +1257,19 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
                     </div>
                   ))}
 
-                  {/* Timeline area */}
-                  <div
-                    data-timeline
-                    className={`absolute left-14 right-0 top-0 bottom-0 ${draggingEvent ? 'cursor-grabbing' : onCreateTask ? 'cursor-crosshair' : ''}`}
-                    onMouseDown={(e) => {
-                      if (!draggingEvent) handleTimelineMouseDown(e, currentDate);
-                    }}
-                    onMouseMove={(e) => {
-                      if (draggingEvent) {
-                        handleEventDragMove(e, currentDate);
-                      } else {
-                        handleTimelineMouseMove(e);
-                      }
-                    }}
-                    onMouseUp={() => {
-                      if (draggingEvent) {
-                        handleEventDragEnd();
-                      } else {
-                        handleTimelineMouseUp();
-                      }
-                    }}
-                    onMouseLeave={() => {
-                      if (dragState.isDragging) handleTimelineMouseUp();
-                    }}
-                  >
-                    {/* Hour lines */}
-                    {HOURS.map((hour) => (
-                      <div
-                        key={hour}
-                        className={`absolute w-full border-t ${colors.borderLight} pointer-events-none`}
-                        style={{ top: `${(hour - 7) * 48}px` }}
-                      />
-                    ))}
-
-                    {/* Drag preview */}
-                    {(() => {
-                      const dragPreview = getDragPreview();
-                      const isThisDayDragging = dragState.isDragging && dragState.day && isSameDay(dragState.day, currentDate);
-                      if (!isThisDayDragging || !dragPreview) return null;
-                      return (
-                        <div
-                          className="absolute left-2 right-2 bg-[#5E5CE6]/30 border-2 border-[#5E5CE6] border-dashed rounded-md pointer-events-none z-20"
-                          style={{
-                            top: `${dragPreview.top}px`,
-                            height: `${Math.max(dragPreview.height, 24)}px`,
-                          }}
-                        >
-                          <div className="px-2 py-0.5 text-xs text-[#5E5CE6] font-medium">
-                            {dragPreview.startTime} - {dragPreview.endTime}
-                          </div>
-                        </div>
-                      );
-                    })()}
-
-                    {/* Current time indicator */}
-                    {isToday(currentDate) && (
-                      <div
-                        className="absolute w-full h-0.5 bg-[#EF4444] z-10 pointer-events-none"
-                        style={{
-                          top: `${((getHours(new Date()) - 7) * 60 + getMinutes(new Date())) * (48 / 60)}px`,
-                        }}
-                      >
-                        <div className="absolute -left-1 -top-1 w-2 h-2 bg-[#EF4444] rounded-full" />
-                      </div>
-                    )}
-
-                    {/* Events */}
-                    {getEventsForDay(currentDate)
-                      .filter(e => !e.allDay)
-                      .map((event, i, arr) => renderTimelineEvent(event, i, arr.length, currentDate))}
+                  <div className="absolute left-14 right-0 top-0 bottom-0">
+                    <TimelineColumn
+                      day={currentDate}
+                      dayIndex={0}
+                      events={getEventsForDay(currentDate)}
+                      isDark={isDark}
+                      onOpen={handleOpenEvent}
+                      onMarkDone={handleMarkDone}
+                      onDelete={handleDeleteEvent}
+                      onDrop={handleTimelineDrop}
+                      isDragDisabled={false}
+                      colors={colors}
+                    />
                   </div>
                 </div>
               </div>
@@ -1291,7 +1279,6 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
 
         {/* Side Panel */}
         <div className={`w-72 border-l ${colors.border} ${colors.bg} flex flex-col`}>
-          {/* Panel header */}
           <div className={`px-4 py-3 border-b ${colors.border}`}>
             <div className="flex items-center justify-between">
               <div>
@@ -1299,20 +1286,15 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
                   {selectedDate ? format(selectedDate, 'EEEE') : 'Select a day'}
                 </h3>
                 {selectedDate && (
-                  <p className={`text-xs ${colors.textMuted}`}>
-                    {format(selectedDate, 'd MMMM yyyy')}
-                  </p>
+                  <p className={`text-xs ${colors.textMuted}`}>{format(selectedDate, 'd MMMM yyyy')}</p>
                 )}
               </div>
               {selectedDate && isToday(selectedDate) && (
-                <span className="px-1.5 py-0.5 text-[10px] font-medium bg-[#5E5CE6]/20 text-[#5E5CE6] rounded">
-                  Today
-                </span>
+                <span className="px-1.5 py-0.5 text-[10px] font-medium bg-[#5E5CE6]/20 text-[#5E5CE6] rounded">Today</span>
               )}
             </div>
           </div>
 
-          {/* Events list */}
           <div className="flex-1 overflow-auto">
             {!selectedDate ? (
               <div className={`flex items-center justify-center h-full text-sm ${colors.textMuted}`}>
@@ -1323,30 +1305,30 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
                 <div className={`w-10 h-10 rounded-full ${colors.bgSecondary} flex items-center justify-center mb-3`}>
                   <CalendarIcon className={`w-5 h-5 ${colors.textDimmed}`} />
                 </div>
-                <p className={`text-sm ${colors.textMuted}`}>No events</p>
+                <p className={`text-sm ${colors.textMuted} mb-3`}>No events</p>
+                {onCreateTask && (
+                  <button
+                    onClick={() => handleQuickAdd(selectedDate)}
+                    className={`flex items-center gap-1 px-3 py-1.5 text-xs font-medium rounded-md transition-colors bg-[#5E5CE6] text-white hover:bg-[#4B4ACF]`}
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    Add task
+                  </button>
+                )}
               </div>
             ) : (
               <div className="p-2 space-y-1">
                 {selectedDateEvents.map(event => (
                   <div
                     key={event.id}
-                    className={`
-                      group p-2.5 rounded-lg transition-all cursor-pointer
-                      ${isDark ? 'hover:bg-[#1A1A1A]' : 'hover:bg-gray-100'}
-                      ${event.taskStatus === 'done' ? 'opacity-50' : ''}
-                      ${event.isSubtask ? 'border-l-2 border-[#F59E0B] ml-2' : ''}
-                    `}
+                    className={`group p-2.5 rounded-lg transition-all cursor-pointer ${isDark ? 'hover:bg-[#1A1A1A]' : 'hover:bg-gray-100'} ${event.taskStatus === 'done' ? 'opacity-50' : ''} ${event.isSubtask ? 'border-l-2 border-[#F59E0B] ml-2' : ''}`}
                     onClick={() => handleOpenEvent(event)}
                   >
                     <div className="flex items-start gap-2">
-                      {/* Status checkbox / indicator */}
                       <div className="mt-0.5">
                         {event.isFromApp ? (
                           <button
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              handleMarkAsDone(event, e);
-                            }}
+                            onClick={(e) => { e.stopPropagation(); handleMarkDone(event); }}
                             className={`transition-all ${event.taskStatus === 'done' ? '' : 'opacity-60 group-hover:opacity-100'}`}
                           >
                             {event.taskStatus === 'done' ? (
@@ -1375,24 +1357,17 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
                             </span>
                           )}
                           {event.isSubtask && event.parentTaskTitle && (
-                            <span className={`text-[10px] ${colors.textMuted} truncate`}>
-                              {event.parentTaskTitle}
-                            </span>
+                            <span className={`text-[10px] ${colors.textMuted} truncate`}>{event.parentTaskTitle}</span>
                           )}
                           {event.isFromApp && !event.isSubtask && (
-                            <span className="text-[10px] px-1 py-0.5 bg-[#5E5CE6]/10 text-[#5E5CE6] rounded">
-                              Task
-                            </span>
+                            <span className="text-[10px] px-1 py-0.5 bg-[#5E5CE6]/10 text-[#5E5CE6] rounded">Task</span>
                           )}
                           {event.isSubtask && (
-                            <span className="text-[10px] px-1 py-0.5 bg-[#F59E0B]/10 text-[#F59E0B] rounded">
-                              Subtask
-                            </span>
+                            <span className="text-[10px] px-1 py-0.5 bg-[#F59E0B]/10 text-[#F59E0B] rounded">Subtask</span>
                           )}
                         </div>
                       </div>
 
-                      {/* Action buttons */}
                       <div className="flex items-center gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
                         {event.htmlLink && (
                           <a
@@ -1407,9 +1382,8 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
                         )}
                         {event.isFromApp && (
                           <button
-                            onClick={(e) => handleDeleteEvent(event, e)}
-                            className={`p-1 rounded transition-all hover:bg-red-500/10`}
-                            title={`Delete ${event.isSubtask ? 'subtask' : 'task'}`}
+                            onClick={(e) => { e.stopPropagation(); handleDeleteEvent(event); }}
+                            className="p-1 rounded transition-all hover:bg-red-500/10"
                           >
                             <Trash2 className="w-3.5 h-3.5 text-red-500" />
                           </button>
@@ -1422,7 +1396,6 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
             )}
           </div>
 
-          {/* Stats footer */}
           {selectedDate && selectedDateEvents.length > 0 && (
             <div className={`px-4 py-2.5 border-t ${colors.border} ${isDark ? 'bg-[#0A0A0A]' : 'bg-gray-50'}`}>
               <div className={`flex items-center justify-between text-[10px] ${colors.textMuted}`}>
@@ -1433,38 +1406,6 @@ export default function CalendarView({ tasks = [], subtasks = [], onTaskClick, o
           )}
         </div>
       </div>
-
-      {/* Drag overlay - follows mouse cursor when dragging event */}
-      {draggingEvent && (
-        <div
-          className="fixed pointer-events-none z-[100]"
-          style={{
-            left: `${dragEventX - 80}px`, // Center on cursor (160px width / 2)
-            top: `${dragEventScreenY - 20}px`, // Use absolute screen Y position
-            width: '160px',
-          }}
-        >
-          <div
-            className={`
-              rounded-md px-2 py-1 text-xs shadow-2xl
-              ${draggingEvent.isSubtask ? 'bg-[#F59E0B]' : 'bg-[#5E5CE6]'}
-              ring-2 ring-white/50 scale-105 opacity-90
-            `}
-            style={{ height: '40px' }}
-          >
-            <div className="font-medium text-white truncate">
-              {draggingEvent.isSubtask && <span className="opacity-70">↳ </span>}
-              {draggingEvent.title}
-            </div>
-            <div className="text-white/70 text-[10px]">
-              {dragEventDay ? format(dragEventDay, 'EEE d MMM') : ''} • {(() => {
-                const { hour, minutes } = yToTime(dragEventY);
-                return `${String(hour).padStart(2, '0')}:${String(minutes).padStart(2, '0')}`;
-              })()}
-            </div>
-          </div>
-        </div>
-      )}
     </div>
   );
 }
